@@ -1,0 +1,62 @@
+name: Update Resolution URLs
+
+on:
+  schedule:
+    - cron: "0 */5 * * *"  # every 5 hours
+  workflow_dispatch:
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run script
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+        run: python update_resolution.py
+
+      # ✅ Update file ONLY once per day
+      - name: Update lastupdated.txt (daily only)
+        run: |
+          TODAY=$(date -u +"%Y-%m-%d")
+
+          if [ -f lastupdated.txt ]; then
+            LAST=$(cat lastupdated.txt)
+          else
+            LAST=""
+          fi
+
+          if [ "$TODAY" != "$LAST" ]; then
+            echo "$TODAY" > lastupdated.txt
+            echo "UPDATED=true" >> $GITHUB_ENV
+          else
+            echo "No update needed"
+            echo "UPDATED=false" >> $GITHUB_ENV
+          fi
+
+      # ✅ Commit only if file changed
+      - name: Commit and push
+        if: env.UPDATED == 'true'
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+
+          git add lastupdated.txt
+          git commit -m "chore: update daily timestamp $(date -u +"%Y-%m-%d")"
+
+          git push
