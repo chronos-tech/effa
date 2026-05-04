@@ -66,7 +66,7 @@ def main():
                 new_url = data["hls"]
 
                 update_url(conn, record_id, new_url)
-                print(f"Updated {record_id} -> {new_url}")
+                print(f"Updated {record_id}")
             else:
                 print(f"No hls for {record_id}")
 
