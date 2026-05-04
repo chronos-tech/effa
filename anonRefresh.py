@@ -30,7 +30,20 @@ def update_url(conn, record_id, new_url):
     conn.commit()
 
 def main():
+    print("Entering main()")
+
+    if not DATABASE_URL:
+        print("❌ DATABASE_URL is missing")
+        return
+
+    if not BASE_URL:
+        print("❌ API_BASE_URL is missing")
+        return
+
+    print("Connecting to DB...")
     conn = get_connection()
+
+    print("Fetching records...")
     records = fetch_resolutions(conn)
 
     print(f"Found {len(records)} records")
