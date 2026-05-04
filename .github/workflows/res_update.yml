@@ -28,7 +28,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           API_BASE_URL: ${{ secrets.API_BASE_URL }}
-        run: python update_resolution.py
+        run: python anonRefresh.py
 
       # ✅ Update file ONLY once per day
       - name: Update lastupdated.txt (daily only)
