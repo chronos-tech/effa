@@ -28,6 +28,7 @@ jobs:
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          API_BASE_URL2: ${{ secrets.API_BASE_URL2 }}
         run: python -u anonRefresh.py
 
       # ✅ Update file ONLY once per day
