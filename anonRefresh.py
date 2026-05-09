@@ -7,6 +7,7 @@ from psycopg2.extras import RealDictCursor
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 BASE_URL = os.getenv("API_BASE_URL")
+BASE_URL2 = os.getenv("API_BASE_URL2")
 
 def get_connection():
     return psycopg2.connect(DATABASE_URL)
@@ -29,6 +30,12 @@ def update_url(conn, record_id, new_url):
         """, (new_url, record_id))
     conn.commit()
 
+def extract_fetch_id(text):
+    try:
+        return text.split("/load/")[1].split("';")[0]
+    except Exception:
+        return None
+
 def main():
     print("Entering main()")
 
@@ -38,6 +45,10 @@ def main():
 
     if not BASE_URL:
         print("❌ API_BASE_URL is missing")
+        return
+
+    if not BASE_URL2:
+        print("❌ API_BASE_URL2 is missing")
         return
 
     print("Connecting to DB...")
@@ -53,19 +64,49 @@ def main():
         record_id = r["id"]
 
         try:
-            url = f"{BASE_URL}/{anon_id}"
-            res = requests.get(url, timeout=15)
+            # Step 1: Fetch HTML page
+            url_fetch_anon_id = f"{BASE_URL2}/{anon_id}"
+
+            res2 = requests.get(
+                url_fetch_anon_id,
+                timeout=15,
+                allow_redirects=False
+            )
+
+            if res2.status_code != 200:
+                print(f"Skip {record_id} (status {res2.status_code})")
+                continue
+
+            data2 = res2.text
+
+            # Step 2: Extract fetch id
+            anon_fetchid = extract_fetch_id(data2)
+
+            if not anon_fetchid:
+                print(f"Could not extract fetch id for {record_id}")
+                continue
+
+            # Step 3: Fetch API
+            url = f"{BASE_URL}/{anon_fetchid}"
+
+            res = requests.get(
+                url,
+                timeout=15,
+                allow_redirects=False
+            )
 
             if res.status_code != 200:
-                print(f"Skip {record_id} (status {res.status_code})")
+                print(f"Skip {record_id} API (status {res.status_code})")
                 continue
 
             data = res.json()
 
+            # Step 4: Update DB
             if data.get("status") == "ok" and data.get("hls"):
                 new_url = data["hls"]
 
                 update_url(conn, record_id, new_url)
+
                 print(f"Updated {record_id}")
             else:
                 print(f"No hls for {record_id}")
@@ -73,9 +114,10 @@ def main():
         except Exception as e:
             print(f"Error {record_id}: {e}")
 
-        # random delay 7–15 seconds
         delay = random.randint(7, 15)
+
         print(f"Sleeping {delay}s...")
+
         time.sleep(delay)
 
     conn.close()
