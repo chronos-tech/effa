@@ -65,6 +65,7 @@ def main():
 
         try:
             # Step 1: Fetch HTML page
+            print(f"Init Step 1 of {record_id}")
             url_fetch_anon_id = f"{BASE_URL2}/{anon_id}"
 
             res2 = requests.get(
@@ -72,20 +73,21 @@ def main():
                 timeout=15,
                 allow_redirects=False
             )
-
+            
             if res2.status_code != 200:
                 print(f"Skip {record_id} (status {res2.status_code})")
                 continue
-
+            print(f"Step 1 of {record_id} Passed!")
             data2 = res2.text
-
+            print(f"Step 1 of {record_id} Success!")
+            print(f"Init Step 2 of {record_id}")
             # Step 2: Extract fetch id
             anon_fetchid = extract_fetch_id(data2)
-
+            
             if not anon_fetchid:
                 print(f"Could not extract fetch id for {record_id}")
                 continue
-
+            print(f"Step 2 of {record_id} Passed!")
             # Step 3: Fetch API
             url = f"{BASE_URL}/{anon_fetchid}"
 
@@ -98,9 +100,9 @@ def main():
             if res.status_code != 200:
                 print(f"Skip {record_id} API (status {res.status_code})")
                 continue
-
+            print(f"Step 2 of {record_id} Success!")
             data = res.json()
-
+            print(f"Update HLS record of {record_id}")
             # Step 4: Update DB
             if data.get("status") == "ok" and data.get("hls"):
                 new_url = data["hls"]
