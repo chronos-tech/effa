@@ -2,7 +2,7 @@ name: Update Resolution URLs
 
 on:
   schedule:
-    - cron: "0 */3 * * *"  # every 5 hours
+    - cron: "0 */5 * * *"  # every 5 hours
   workflow_dispatch:
 
 jobs:
