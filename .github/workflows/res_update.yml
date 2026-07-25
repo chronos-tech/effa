@@ -29,9 +29,11 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           API_BASE_URL: ${{ secrets.API_BASE_URL }}
           API_BASE_URL2: ${{ secrets.API_BASE_URL2 }}
+          THOST: ${{ secrets.THOST }}
+          TPATH: ${{ secrets.TPATH }}
+          NTFY_TTOPIC: ${{ secrets.NTFY_TTOPIC }}
         run: python -u anonRefresh.py
 
-      # ✅ Update file ONLY once per day
       - name: Update lastupdated.txt (daily only)
         run: |
           TODAY=$(date -u +"%Y-%m-%d")
@@ -44,20 +46,20 @@ jobs:
 
           if [ "$TODAY" != "$LAST" ]; then
             echo "$TODAY" > lastupdated.txt
-            echo "UPDATED=true" >> $GITHUB_ENV
-          else
-            echo "No update needed"
-            echo "UPDATED=false" >> $GITHUB_ENV
           fi
 
-      # ✅ Commit only if file changed
-      - name: Commit and push
-        if: env.UPDATED == 'true'
+      - name: Commit and push changes
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-
-          git add lastupdated.txt
-          git commit -m "chore: update daily timestamp $(date -u +"%Y-%m-%d")"
-
-          git push
+          
+          # Stage both tracking files
+          git add lastupdated.txt fetch_cache.json || true
+          
+          # ตรวจสอบว่ามีการแก้ไขไฟล์หรือไม่
+          if git diff --cached --quiet; then
+            echo "No updates needed to cache or timestamp."
+          else
+            git commit -m "chore: update cache and daily timestamp $(date -u +"%Y-%m-%d")"
+            git push
+          fi
