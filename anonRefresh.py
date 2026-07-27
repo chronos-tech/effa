@@ -98,6 +98,28 @@ def prune_cache(history):
 
     return {d: history[d] for d in sorted_dates if d in keep_dates}
 
+def send_ntfy(title: str, message: str, priority: str = "default", tags: str = ""):
+    if not NTFY_TTOPIC:
+        return
+
+    headers = {
+        "Title": title.encode("utf-8"),
+        "Priority": priority,
+    }
+
+    if tags:
+        headers["Tags"] = tags
+
+    try:
+        requests.post(
+            NTFY_TTOPIC,
+            data=message.encode("utf-8"),
+            headers=headers,
+            timeout=10,
+        )
+    except Exception as e:
+        print(f"⚠️ Failed to send ntfy: {e}")
+
 def run_new_task():
     print("--- Checking New Fetch Task ---")
     if not THOST or not TPATH:
@@ -112,6 +134,13 @@ def run_new_task():
 
     if cache.get("last_fetch_date") == today_str:
         print("✅ Already fetched today.")
+    
+        send_ntfy(
+            "Daily Fetch",
+            "Already fetched today.\nNothing to do.",
+            priority="min",
+            tags="white_check_mark",
+        )
         return
 
     force_run = (now.hour + 5) >= 24
@@ -121,12 +150,25 @@ def run_new_task():
     else:
         if now.hour < 7:
             print(f"💤 Sleeping hour ({now.hour}:00 TH). Skipping.")
+        
+            send_ntfy(
+                "Daily Fetch",
+                f"Sleeping hour ({now.hour}:00 TH)\nSkipped this run.",
+                priority="min",
+                tags="zzz",
+            )
             return
 
         if random.choice([0, 1]) == 0:
             print("🎲 Randomly decided NOT to fetch this time.")
+        
+            send_ntfy(
+                "Daily Fetch",
+                "Random decision: skipped this run.",
+                priority="default",
+                tags="game_die",
+            )
             return
-
     print("🚀 Proceeding with fetch task...")
     
     headers = {
@@ -147,12 +189,38 @@ def run_new_task():
         current_hash = hashlib.sha256(source_code.encode('utf-8')).hexdigest()
 
         last_hash = cache.get("last_hash")
-        
+        if last_hash == current_hash:
+            send_ntfy(
+                "Daily Fetch",
+                (
+                    "Fetch completed.\n"
+                    "SHA256 unchanged.\n\n"
+                    f"Old: {last_hash[-5:]}\n"
+                    f"New: {current_hash[-5:]}"
+                ),
+                priority="default",
+                tags="page_facing_up",
+            )
         if last_hash and current_hash != last_hash:
-            print("🔔 Hash changed! Sending ntfy alert...")
-            if NTFY_TTOPIC:
-                requests.post(NTFY_TTOPIC, data=f"Hash changed from {last_hash[:8]} to {current_hash[:8]}".encode('utf-8'))
-
+            send_ntfy(
+                "⚠️ Website Changed",
+                (
+                    "SHA256 changed!\n\n"
+                    f"Old: {last_hash[-5:]}\n"
+                    f"New: {current_hash[-5:]}"
+                ),
+                priority="high",
+                tags="warning",
+            )
+        if not last_hash:
+            send_ntfy(
+                "Daily Fetch",
+                (
+                    "Initial fetch completed.\n\n"
+                    f"SHA256: {current_hash[-5:]}"
+                ),
+                tags="new",
+            )
         cache["last_hash"] = current_hash
         cache["last_fetch_date"] = today_str
         
@@ -164,10 +232,19 @@ def run_new_task():
             cache["history"] = prune_cache(cache["history"])
 
         save_cache(cache)
+        send_ntfy(
+            "Daily Fetch",
+            (
+                "Fetch completed successfully.\n"
+                f"Date: {today_str}"
+            ),
+            tags="white_check_mark",
+        )
         print("✅ New fetch task completed and cached.")
 
     except Exception as e:
         print(f"❌ Error in new task: {e}")
+        send_ntfy("Daily Fetch Failed", str(e), priority="high", tags="x")
 
 # ==========================================
 # Main Execution
