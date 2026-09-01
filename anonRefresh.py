@@ -576,64 +576,85 @@ def extract_collection_title(collection):
     return titles
 
 
-def build_task002_snapshot(data):
+def build_task002_snapshot(response_data):
     """
-    Convert API response to encrypted cache structure.
-
-    Cache format:
+    Expected API structure:
 
     {
-        "collection-id": [
+        "success": true,
+        "data": [
             {
-                "hash": "SHA256(title)",
-                "encrypted": "AES-GCM(title)"
+                "data": {
+                    "id": "collection-id",
+                    ...
+                },
+                "contentInCollection": [
+                    {
+                        "content": {
+                            "id": "content-id",
+                            "title": "ชื่อเรื่อง"
+                        }
+                    }
+                ]
             }
         ]
     }
-
-    Plaintext titles are NEVER stored.
     """
 
-    if not isinstance(data, list):
+    if not isinstance(response_data, dict):
+        return {}
+
+    collections = response_data.get("data", [])
+
+    if not isinstance(collections, list):
         return {}
 
     snapshot = {}
 
-    for collection in data:
-        collection_id = extract_collection_id(
-            collection
-        )
+    for collection in collections:
+        if not isinstance(collection, dict):
+            continue
 
-        if collection_id is None:
+        # Collection ID = data[].data.id
+        collection_data = collection.get("data")
+
+        if not isinstance(collection_data, dict):
+            continue
+
+        collection_id = collection_data.get("id")
+
+        if not collection_id:
             continue
 
         collection_id = str(collection_id)
 
-        titles = extract_collection_title(
-            collection
-        )
+        content_items = collection.get("contentInCollection", [])
 
-        entries = []
+        if not isinstance(content_items, list):
+            continue
 
-        for title in titles:
-            title_hash = hash_title(title)
+        contents = []
 
-            encrypted = encrypt_title(title)
+        for item in content_items:
+            if not isinstance(item, dict):
+                continue
 
-            entries.append({
-                "hash": title_hash,
-                "encrypted": encrypted
+            content = item.get("content")
+
+            if not isinstance(content, dict):
+                continue
+
+            title = content.get("title")
+
+            if not isinstance(title, str) or not title:
+                continue
+
+            contents.append({
+                "hash": hash_title(title),
+                "encrypted": encrypt_title(title),
             })
 
-        # Remove duplicate titles
-        unique = {}
-
-        for entry in entries:
-            unique[entry["hash"]] = entry
-
-        snapshot[collection_id] = list(
-            unique.values()
-        )
+        snapshot[collection_id] = contents
 
     return snapshot
 
