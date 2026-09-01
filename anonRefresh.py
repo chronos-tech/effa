@@ -1,322 +1,1284 @@
 import os
+import sys
 import time
 import random
+import argparse
 import requests
 import psycopg2
 import hashlib
 import json
-from datetime import datetime, timedelta, timezone
+
+from datetime import datetime, timezone, timedelta
 from psycopg2.extras import RealDictCursor
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+
+# ============================================================
+# ENV
+# ============================================================
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-BASE_URL = os.getenv("API_BASE_URL")
-BASE_URL2 = os.getenv("API_BASE_URL2")
 
-# New Task Envs
+API_BASE_URL = os.getenv("API_BASE_URL")
+API_BASE_URL2 = os.getenv("API_BASE_URL2")
+
 THOST = os.getenv("THOST")
 TPATH = os.getenv("TPATH")
+
 NTFY_TTOPIC = os.getenv("NTFY_TTOPIC")
+
+# Task 002
+OHOST = os.getenv("ENV_OHOST")
+OAPIKEY = os.getenv("ENV_OAPIKEY")
+OREFERER = os.getenv("ENV_OREFERER")
+
+
+# ============================================================
+# CONSTANTS
+# ============================================================
 
 CACHE_FILE = "fetch_cache.json"
 
-def get_connection():
-    try:
-        return psycopg2.connect(DATABASE_URL)
-    except psycopg2.OperationalError:
-        print("❌ Database connection failed. (Host details hidden for security)")
-        return None
-    except Exception as e:
-        print(f"❌ Database connection failed with an unexpected error: {type(e).__name__}")
-        return None
+THAI_TZ = timezone(timedelta(hours=7))
 
-def fetch_resolutions(conn):
-    with conn.cursor(cursor_factory=RealDictCursor) as cur:
-        cur.execute("""
-            SELECT id, "anonId"
-            FROM "Resolution"
-            WHERE "anonId" IS NOT NULL
-        """)
-        return cur.fetchall()
 
-def update_url(conn, record_id, new_url):
-    with conn.cursor() as cur:
-        cur.execute("""
-            UPDATE "Resolution"
-            SET url = %s
-            WHERE id = %s
-        """, (new_url, record_id))
-    conn.commit()
-
-def extract_fetch_id(text):
-    try:
-        return text.split("/load/")[1].split("';")[0]
-    except Exception:
-        return None
-
-# ==========================================
-# New Task: Cache and Pruning Logic
-# ==========================================
+# ============================================================
+# CACHE
+# ============================================================
 
 def load_cache():
-    if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return {"last_fetch_date": "", "last_hash": "", "history": {}}
-
-def save_cache(cache):
-    with open(CACHE_FILE, 'w', encoding='utf-8') as f:
-        json.dump(cache, f, indent=4)
-
-def prune_cache(history):
-    """
-    เก็บเฉพาะวันอาทิตย์, วันก่อนเกิดการเปลี่ยนแปลง, และวันที่เกิดการเปลี่ยนแปลง
-    """
-    sorted_dates = sorted(history.keys())
-    if not sorted_dates: 
+    if not os.path.exists(CACHE_FILE):
         return {}
 
-    keep_dates = set()
-    for i, date_str in enumerate(sorted_dates):
-        dt = datetime.strptime(date_str, "%Y-%m-%d")
-        
-        # 1. ยึดวันอาทิตย์เป็นหลัก (weekday() == 6)
-        if dt.weekday() == 6:
-            keep_dates.add(date_str)
+    try:
+        with open(CACHE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
 
-        # 2. เช็คว่าเปลี่ยนกลางคันหรือไม่
-        if i < len(sorted_dates) - 1:
-            next_date = sorted_dates[i+1]
-            if history[date_str] != history[next_date]:
-                keep_dates.add(date_str)  # วันก่อนเปลี่ยน
-                keep_dates.add(next_date) # วันหลังเปลี่ยน (วันที่ Hash เริ่มต่าง)
-                
-        if i > 0:
-            prev_date = sorted_dates[i-1]
-            if history[date_str] != history[prev_date]:
-                keep_dates.add(date_str)
-                keep_dates.add(prev_date)
+        if not isinstance(data, dict):
+            return {}
 
-    return {d: history[d] for d in sorted_dates if d in keep_dates}
+        return data
 
-def send_ntfy(title: str, message: str, priority: str = "default", tags: str = ""):
+    except (json.JSONDecodeError, OSError):
+        print("[WARN] Cannot read cache. Starting with empty cache.")
+        return {}
+
+
+def save_cache(cache):
+    temp_file = f"{CACHE_FILE}.tmp"
+
+    with open(temp_file, "w", encoding="utf-8") as f:
+        json.dump(
+            cache,
+            f,
+            ensure_ascii=False,
+            indent=2
+        )
+
+    os.replace(temp_file, CACHE_FILE)
+
+
+# ============================================================
+# NTFY
+# ============================================================
+
+def send_ntfy(message):
     if not NTFY_TTOPIC:
+        print("[WARN] NTFY_TTOPIC is not configured.")
         return
-
-    headers = {
-        "Title": title.encode("utf-8"),
-        "Priority": priority,
-    }
-
-    if tags:
-        headers["Tags"] = tags
 
     try:
-        requests.post(
+        response = requests.post(
             NTFY_TTOPIC,
             data=message.encode("utf-8"),
-            headers=headers,
-            timeout=10,
+            timeout=20
         )
-    except Exception as e:
-        print(f"⚠️ Failed to send ntfy: {e}")
 
-def run_new_task():
-    print("--- Checking New Fetch Task ---")
-    if not THOST or not TPATH:
-        print("⏭️ THOST or TPATH missing. Skipping new task.")
+        if response.status_code >= 400:
+            print(
+                f"[WARN] ntfy failed: "
+                f"{response.status_code} {response.text}"
+            )
+        else:
+            print("[INFO] ntfy sent.")
+
+    except requests.RequestException as e:
+        print(f"[WARN] ntfy error: {e}")
+
+
+# ============================================================
+# TASK 0
+# Original Resolution refresh
+# ============================================================
+
+def get_connection():
+    return psycopg2.connect(DATABASE_URL)
+
+
+def fetch_resolutions():
+    conn = get_connection()
+
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                '''
+                SELECT id, "anonId"
+                FROM "Resolution"
+                WHERE "anonId" IS NOT NULL
+                '''
+            )
+
+            return cursor.fetchall()
+
+    finally:
+        conn.close()
+
+
+def update_url(resolution_id, url):
+    conn = get_connection()
+
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                '''
+                UPDATE "Resolution"
+                SET url = %s
+                WHERE id = %s
+                ''',
+                (url, resolution_id)
+            )
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+
+def extract_fetch_id(html):
+    try:
+        return html.split("/load/")[1].split("';")[0]
+    except (IndexError, AttributeError):
+        return None
+
+
+def run_task_0():
+    print("=" * 60)
+    print("TASK 0 - Refresh Resolution")
+    print("=" * 60)
+
+    if not DATABASE_URL:
+        print("[ERROR] DATABASE_URL is not configured.")
         return
 
-    tz_th = timezone(timedelta(hours=7))
-    now = datetime.now(tz_th)
-    today_str = now.strftime("%Y-%m-%d")
+    if not API_BASE_URL or not API_BASE_URL2:
+        print("[ERROR] API_BASE_URL / API_BASE_URL2 is not configured.")
+        return
+
+    try:
+        resolutions = fetch_resolutions()
+    except Exception as e:
+        print(f"[ERROR] Cannot fetch resolutions: {e}")
+        return
+
+    print(f"[INFO] Found {len(resolutions)} resolutions.")
+
+    session = requests.Session()
+
+    for index, resolution in enumerate(resolutions, start=1):
+        resolution_id = resolution["id"]
+        anon_id = resolution["anonId"]
+
+        print(
+            f"[{index}/{len(resolutions)}] "
+            f"Processing {resolution_id}"
+        )
+
+        try:
+            # ------------------------------------------------
+            # Step 1
+            # ------------------------------------------------
+
+            url1 = f"{API_BASE_URL2}/{anon_id}"
+
+            response1 = session.get(
+                url1,
+                timeout=20
+            )
+
+            if response1.status_code != 200:
+                print(
+                    f"[WARN] Step 1 failed: "
+                    f"{response1.status_code}"
+                )
+                continue
+
+            fetch_id = extract_fetch_id(response1.text)
+
+            if not fetch_id:
+                print("[WARN] Cannot extract fetch ID.")
+                continue
+
+            # ------------------------------------------------
+            # Step 2
+            # ------------------------------------------------
+
+            url2 = f"{API_BASE_URL}/{fetch_id}"
+
+            response2 = session.get(
+                url2,
+                timeout=20
+            )
+
+            if response2.status_code != 200:
+                print(
+                    f"[WARN] Step 2 failed: "
+                    f"{response2.status_code}"
+                )
+                continue
+
+            data = response2.json()
+
+            if (
+                isinstance(data, dict)
+                and data.get("status") == "ok"
+                and data.get("hls")
+            ):
+                update_url(
+                    resolution_id,
+                    data["hls"]
+                )
+
+                print("[OK] URL updated.")
+
+            else:
+                print("[WARN] Invalid API response.")
+
+        except requests.RequestException as e:
+            print(f"[WARN] Request error: {e}")
+
+        except Exception as e:
+            print(f"[WARN] Unexpected error: {e}")
+
+        # Avoid hammering API
+        sleep_time = random.uniform(7, 15)
+        print(f"[INFO] Sleeping {sleep_time:.2f}s")
+        time.sleep(sleep_time)
+
+    print("[INFO] Task 0 completed.")
+
+
+# ============================================================
+# TASK 001
+# Original TPATH checking
+# ============================================================
+
+def run_task_001():
+    print("=" * 60)
+    print("TASK 001")
+    print("=" * 60)
+
+    if not TPATH:
+        print("[ERROR] TPATH is not configured.")
+        return
 
     cache = load_cache()
 
-    if cache.get("last_fetch_date") == today_str:
-        print("✅ Already fetched today.")
-    
-        send_ntfy(
-            "Daily Fetch",
-            "Already fetched today.\nNothing to do.",
-            priority="min",
-            tags="white_check_mark",
-        )
+    task_cache = cache.setdefault(
+        "task001",
+        {}
+    )
+
+    now = datetime.now(THAI_TZ)
+    today = now.strftime("%Y-%m-%d")
+
+    last_fetch_date = task_cache.get("last_fetch_date")
+
+    # Already checked today
+    if last_fetch_date == today:
+        print("[INFO] Task001 already ran today.")
         return
 
-    force_run = (now.hour + 5) >= 24
+    # Don't run too early
+    if now.hour < 7:
+        print("[INFO] Task001 skipped because current hour < 07:00.")
+        return
 
-    if force_run:
-        print(f"⚡ Next cron is tomorrow (Current hour: {now.hour}:00 TH). Forcing fetch!")
-    else:
-        if now.hour < 7:
-            print(f"💤 Sleeping hour ({now.hour}:00 TH). Skipping.")
-        
-            send_ntfy(
-                "Daily Fetch",
-                f"Sleeping hour ({now.hour}:00 TH)\nSkipped this run.",
-                priority="min",
-                tags="zzz",
-            )
-            return
+    # Force run near midnight
+    force_run = now.hour + 3 >= 24
 
+    if not force_run:
+        # 50% chance to skip
         if random.choice([0, 1]) == 0:
-            print("🎲 Randomly decided NOT to fetch this time.")
-        
-            send_ntfy(
-                "Daily Fetch",
-                "Random decision: skipped this run.",
-                priority="default",
-                tags="game_die",
-            )
+            print("[INFO] Task001 randomly skipped.")
             return
-    print("🚀 Proceeding with fetch task...")
-    
+
     headers = {
-        'sec-ch-ua-platform': '"Windows"',
-        'Referer': THOST,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 Edg/150.0.0.0',
-        'sec-ch-ua': '"Not;A=Brand";v="8", "Chromium";v="150", "Microsoft Edge";v="150"',
-        'sec-ch-ua-mobile': '?0',
+        "User-Agent": (
+            "Mozilla/5.0 "
+            "(Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 "
+            "(KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Accept": "*/*",
     }
 
     try:
-        time.sleep(random.uniform(2.0, 5.0))
-        
-        response = requests.get(TPATH, headers=headers, timeout=15)
-        response.raise_for_status()
+        response = requests.get(
+            TPATH,
+            headers=headers,
+            timeout=30
+        )
 
-        source_code = response.text
-        current_hash = hashlib.sha256(source_code.encode('utf-8')).hexdigest()
+        if response.status_code != 200:
+            print(
+                f"[ERROR] Task001 HTTP "
+                f"{response.status_code}"
+            )
+            return
 
-        last_hash = cache.get("last_hash")
-        if last_hash == current_hash:
-            send_ntfy(
-                "Daily Fetch",
-                (
-                    "Fetch completed.\n"
-                    "SHA256 unchanged.\n\n"
-                    f"Old: {last_hash[-5:]}\n"
-                    f"New: {current_hash[-5:]}"
-                ),
-                priority="default",
-                tags="page_facing_up",
-            )
-        if last_hash and current_hash != last_hash:
-            send_ntfy(
-                "⚠️ Website Changed",
-                (
-                    "SHA256 changed!\n\n"
-                    f"Old: {last_hash[-5:]}\n"
-                    f"New: {current_hash[-5:]}"
-                ),
-                priority="high",
-                tags="warning",
-            )
-        if not last_hash:
-            send_ntfy(
-                "Daily Fetch",
-                (
-                    "Initial fetch completed.\n\n"
-                    f"SHA256: {current_hash[-5:]}"
-                ),
-                tags="new",
-            )
-        cache["last_hash"] = current_hash
-        cache["last_fetch_date"] = today_str
-        
-        if "history" not in cache:
-            cache["history"] = {}
-        cache["history"][today_str] = current_hash
+        content = response.content
 
-        if now.weekday() == 6:
-            cache["history"] = prune_cache(cache["history"])
+        current_hash = hashlib.sha256(
+            content
+        ).hexdigest()
+
+        previous_hash = task_cache.get("last_hash")
+
+        print(f"[INFO] Current hash:  {current_hash}")
+        print(f"[INFO] Previous hash: {previous_hash}")
+
+        if previous_hash is None:
+            print("[INFO] First Task001 run.")
+            task_cache["last_hash"] = current_hash
+            task_cache["last_fetch_date"] = today
+
+            save_cache(cache)
+
+            send_ntfy(
+                "🆕 Task001 initial snapshot saved."
+            )
+
+            return
+
+        if current_hash != previous_hash:
+            print("[INFO] Task001 content changed.")
+
+            send_ntfy(
+                "🔄 Task001 content changed."
+            )
+
+            task_cache["last_hash"] = current_hash
+
+            history = task_cache.setdefault(
+                "history",
+                []
+            )
+
+            history.append({
+                "date": today,
+                "hash": current_hash
+            })
+
+        else:
+            print("[INFO] Task001 content unchanged.")
+
+        task_cache["last_fetch_date"] = today
 
         save_cache(cache)
-        send_ntfy(
-            "Daily Fetch",
-            (
-                "Fetch completed successfully.\n"
-                f"Date: {today_str}"
-            ),
-            tags="white_check_mark",
-        )
-        print("✅ New fetch task completed and cached.")
+
+        # ----------------------------------------------------
+        # Weekly history pruning
+        # ----------------------------------------------------
+
+        if now.weekday() == 6:
+            prune_cache()
+
+    except requests.RequestException as e:
+        print(f"[ERROR] Task001 request failed: {e}")
 
     except Exception as e:
-        print(f"❌ Error in new task: {e}")
-        send_ntfy("Daily Fetch Failed", str(e), priority="high", tags="x")
+        print(f"[ERROR] Task001 failed: {e}")
 
-# ==========================================
-# Main Execution
-# ==========================================
+
+def prune_cache():
+    cache = load_cache()
+
+    task_cache = cache.get("task001")
+
+    if not task_cache:
+        return
+
+    history = task_cache.get("history")
+
+    if not history:
+        return
+
+    # Keep latest 30 records
+    task_cache["history"] = history[-30:]
+
+    save_cache(cache)
+
+    print("[INFO] Task001 history pruned.")
+
+
+# ============================================================
+# TASK 002 - AES + SHA256 + ETag
+# ============================================================
+
+def derive_aes_key(api_key):
+    """
+    Derive a valid AES-256 key from ENV_OAPIKEY.
+
+    AES-256 requires exactly 32 bytes.
+    SHA-256 gives exactly 32 bytes.
+    """
+
+    if not api_key:
+        raise ValueError(
+            "ENV_OAPIKEY is not configured."
+        )
+
+    return hashlib.sha256(
+        api_key.encode("utf-8")
+    ).digest()
+
+
+def encrypt_title(title):
+    """
+    AES-256-GCM encryption.
+
+    Returns Base64 string containing:
+        nonce + ciphertext + authentication tag
+    """
+
+    key = derive_aes_key(OAPIKEY)
+
+    aesgcm = AESGCM(key)
+
+    # GCM nonce must be unique.
+    nonce = os.urandom(12)
+
+    plaintext = title.encode("utf-8")
+
+    ciphertext = aesgcm.encrypt(
+        nonce,
+        plaintext,
+        None
+    )
+
+    payload = nonce + ciphertext
+
+    return __import__("base64").urlsafe_b64encode(
+        payload
+    ).decode("ascii")
+
+
+def decrypt_title(encrypted_title):
+    """
+    Decrypt AES-256-GCM encrypted title.
+    """
+
+    key = derive_aes_key(OAPIKEY)
+
+    aesgcm = AESGCM(key)
+
+    payload = __import__("base64").urlsafe_b64decode(
+        encrypted_title.encode("ascii")
+    )
+
+    nonce = payload[:12]
+    ciphertext = payload[12:]
+
+    plaintext = aesgcm.decrypt(
+        nonce,
+        ciphertext,
+        None
+    )
+
+    return plaintext.decode("utf-8")
+
+
+def hash_title(title):
+    """
+    SHA-256 is ONLY used for comparison.
+
+    The plaintext title is UTF-8 encoded,
+    so Thai language works normally.
+    """
+
+    return hashlib.sha256(
+        title.encode("utf-8")
+    ).hexdigest()
+
+
+# ============================================================
+# Task002 helpers
+# ============================================================
+
+def extract_collection_id(collection):
+    """
+    User specified that collection ID is:
+
+        data[].data.id
+    """
+
+    if not isinstance(collection, dict):
+        return None
+
+    data = collection.get("data")
+
+    if not isinstance(data, dict):
+        return None
+
+    return data.get("id")
+
+
+def extract_collection_title(collection):
+    """
+    User specified title path:
+
+        data[0].contentInCollection[0].content.title
+
+    Each collection is expected to contain:
+        data.contentInCollection[].content.title
+    """
+
+    if not isinstance(collection, dict):
+        return []
+
+    data = collection.get("data")
+
+    if not isinstance(data, dict):
+        return []
+
+    contents = data.get("contentInCollection")
+
+    if not isinstance(contents, list):
+        return []
+
+    titles = []
+
+    for item in contents:
+        if not isinstance(item, dict):
+            continue
+
+        content = item.get("content")
+
+        if not isinstance(content, dict):
+            continue
+
+        title = content.get("title")
+
+        if isinstance(title, str) and title:
+            titles.append(title)
+
+    return titles
+
+
+def build_task002_snapshot(data):
+    """
+    Convert API response to encrypted cache structure.
+
+    Cache format:
+
+    {
+        "collection-id": [
+            {
+                "hash": "SHA256(title)",
+                "encrypted": "AES-GCM(title)"
+            }
+        ]
+    }
+
+    Plaintext titles are NEVER stored.
+    """
+
+    if not isinstance(data, list):
+        return {}
+
+    snapshot = {}
+
+    for collection in data:
+        collection_id = extract_collection_id(
+            collection
+        )
+
+        if collection_id is None:
+            continue
+
+        collection_id = str(collection_id)
+
+        titles = extract_collection_title(
+            collection
+        )
+
+        entries = []
+
+        for title in titles:
+            title_hash = hash_title(title)
+
+            encrypted = encrypt_title(title)
+
+            entries.append({
+                "hash": title_hash,
+                "encrypted": encrypted
+            })
+
+        # Remove duplicate titles
+        unique = {}
+
+        for entry in entries:
+            unique[entry["hash"]] = entry
+
+        snapshot[collection_id] = list(
+            unique.values()
+        )
+
+    return snapshot
+
+
+def normalize_cached_entries(entries):
+    """
+    Supports both:
+
+    New format:
+        {
+            "hash": "...",
+            "encrypted": "..."
+        }
+
+    And old/legacy plaintext format:
+        "Some title"
+
+    Legacy plaintext will be migrated to AES.
+    """
+
+    if not isinstance(entries, list):
+        return []
+
+    normalized = []
+
+    for entry in entries:
+
+        # New format
+        if isinstance(entry, dict):
+            title_hash = entry.get("hash")
+            encrypted = entry.get("encrypted")
+
+            if title_hash and encrypted:
+                normalized.append({
+                    "hash": title_hash,
+                    "encrypted": encrypted
+                })
+
+        # Legacy plaintext
+        elif isinstance(entry, str):
+            try:
+                normalized.append({
+                    "hash": hash_title(entry),
+                    "encrypted": encrypt_title(entry)
+                })
+
+            except Exception as e:
+                print(
+                    f"[WARN] Cannot migrate legacy title: {e}"
+                )
+
+    return normalized
+
+
+def normalize_snapshot(snapshot):
+    if not isinstance(snapshot, dict):
+        return {}
+
+    result = {}
+
+    for collection_id, entries in snapshot.items():
+        result[str(collection_id)] = (
+            normalize_cached_entries(entries)
+        )
+
+    return result
+
+
+def decrypt_cached_title(entry):
+    """
+    Safely decrypt title.
+
+    If decryption fails, return a readable fallback
+    rather than crashing the whole task.
+    """
+
+    try:
+        encrypted = entry.get("encrypted")
+
+        if not encrypted:
+            return "[Unable to decrypt title]"
+
+        return decrypt_title(encrypted)
+
+    except Exception as e:
+        print(
+            f"[WARN] Cannot decrypt title: {e}"
+        )
+
+        return "[Unable to decrypt title]"
+
+
+# ============================================================
+# Task002 diff
+# ============================================================
+
+def diff_collections(old_snapshot, new_snapshot):
+    """
+    Compare collection IDs and title SHA-256 hashes.
+
+    Returns:
+
+        added_collections
+        removed_collections
+        added_contents
+        removed_contents
+    """
+
+    old_ids = set(old_snapshot.keys())
+    new_ids = set(new_snapshot.keys())
+
+    added_collection_ids = new_ids - old_ids
+    removed_collection_ids = old_ids - new_ids
+
+    added_collections = sorted(
+        added_collection_ids
+    )
+
+    removed_collections = sorted(
+        removed_collection_ids
+    )
+
+    added_contents = []
+    removed_contents = []
+
+    # --------------------------------------------------------
+    # Existing collections
+    # --------------------------------------------------------
+
+    for collection_id in sorted(
+        old_ids & new_ids
+    ):
+        old_entries = normalize_cached_entries(
+            old_snapshot.get(collection_id, [])
+        )
+
+        new_entries = normalize_cached_entries(
+            new_snapshot.get(collection_id, [])
+        )
+
+        old_by_hash = {
+            entry["hash"]: entry
+            for entry in old_entries
+            if entry.get("hash")
+        }
+
+        new_by_hash = {
+            entry["hash"]: entry
+            for entry in new_entries
+            if entry.get("hash")
+        }
+
+        old_hashes = set(old_by_hash.keys())
+        new_hashes = set(new_by_hash.keys())
+
+        # ----------------------------------------------------
+        # Added
+        # ----------------------------------------------------
+
+        for title_hash in sorted(
+            new_hashes - old_hashes
+        ):
+            added_contents.append({
+                "collection_id": collection_id,
+                "entry": new_by_hash[title_hash]
+            })
+
+        # ----------------------------------------------------
+        # Removed
+        # ----------------------------------------------------
+
+        for title_hash in sorted(
+            old_hashes - new_hashes
+        ):
+            removed_contents.append({
+                "collection_id": collection_id,
+                "entry": old_by_hash[title_hash]
+            })
+
+    return (
+        added_collections,
+        removed_collections,
+        added_contents,
+        removed_contents
+    )
+
+
+# ============================================================
+# Task002 notifications
+# ============================================================
+
+def notify_task002_changes(
+    added_collections,
+    removed_collections,
+    added_contents,
+    removed_contents,
+    new_snapshot
+):
+    """
+    Send notifications.
+
+    IMPORTANT:
+    Added content notification decrypts the title,
+    so user receives the real Thai title instead of SHA256.
+    """
+
+    # --------------------------------------------------------
+    # Added collections
+    # --------------------------------------------------------
+
+    for collection_id in added_collections:
+        lines = [
+            "📦 Added Collection",
+            "",
+            f"Collection: {collection_id}"
+        ]
+
+        entries = new_snapshot.get(
+            collection_id,
+            []
+        )
+
+        for entry in entries:
+            title = decrypt_cached_title(entry)
+
+            lines.append(
+                f"Title: {title}"
+            )
+
+        send_ntfy(
+            "\n".join(lines)
+        )
+
+    # --------------------------------------------------------
+    # Removed collections
+    # --------------------------------------------------------
+
+    for collection_id in removed_collections:
+        send_ntfy(
+            "\n".join([
+                "🗑️ Removed Collection",
+                "",
+                f"Collection: {collection_id}"
+            ])
+        )
+
+    # --------------------------------------------------------
+    # Added content
+    # --------------------------------------------------------
+
+    for item in added_contents:
+        collection_id = item["collection_id"]
+        entry = item["entry"]
+
+        title = decrypt_cached_title(
+            entry
+        )
+
+        send_ntfy(
+            "\n".join([
+                "🆕 Added Content",
+                "",
+                f"Collection: {collection_id}",
+                f"Title: {title}"
+            ])
+        )
+
+    # --------------------------------------------------------
+    # Removed content
+    # --------------------------------------------------------
+
+    for item in removed_contents:
+        collection_id = item["collection_id"]
+        entry = item["entry"]
+
+        title = decrypt_cached_title(
+            entry
+        )
+
+        send_ntfy(
+            "\n".join([
+                "❌ Removed Content",
+                "",
+                f"Collection: {collection_id}",
+                f"Title: {title}"
+            ])
+        )
+
+
+# ============================================================
+# TASK 002
+# ============================================================
+
+def run_task_002():
+    print("=" * 60)
+    print("TASK 002 - ETag + AES Cache + SHA256")
+    print("=" * 60)
+
+    if not OHOST:
+        print("[ERROR] ENV_OHOST is not configured.")
+        return
+
+    if not OAPIKEY:
+        print("[ERROR] ENV_OAPIKEY is not configured.")
+        return
+
+    cache = load_cache()
+
+    task_cache = cache.setdefault(
+        "task002",
+        {}
+    )
+
+    previous_etag = task_cache.get(
+        "etag"
+    )
+
+    previous_snapshot = task_cache.get(
+        "collections",
+        {}
+    )
+
+    # --------------------------------------------------------
+    # Normalize old cache
+    # --------------------------------------------------------
+
+    previous_snapshot = normalize_snapshot(
+        previous_snapshot
+    )
+
+    headers = {
+        "accept": "*/*",
+        "accept-language": (
+            "en,th;q=0.9,"
+            "en-US;q=0.8,"
+            "en-GB;q=0.7"
+        ),
+        "x-api-key": OAPIKEY,
+    }
+
+    if OREFERER:
+        headers["referer"] = OREFERER
+
+    # --------------------------------------------------------
+    # Send previous ETag
+    # --------------------------------------------------------
+
+    if previous_etag:
+        headers["If-None-Match"] = previous_etag
+
+        print(
+            f"[INFO] Sending If-None-Match: "
+            f"{previous_etag}"
+        )
+    else:
+        print(
+            "[INFO] No previous ETag. "
+            "This is probably the first run."
+        )
+
+    try:
+        response = requests.get(
+            OHOST,
+            headers=headers,
+            timeout=30
+        )
+
+    except requests.RequestException as e:
+        print(
+            f"[ERROR] Task002 request failed: {e}"
+        )
+        return
+
+    # --------------------------------------------------------
+    # 304
+    # --------------------------------------------------------
+
+    if response.status_code == 304:
+        print(
+            "[INFO] API returned 304 Not Modified."
+        )
+
+        task_cache["last_fetch_date"] = (
+            datetime.now(THAI_TZ).isoformat()
+        )
+
+        save_cache(cache)
+
+        return
+
+    # --------------------------------------------------------
+    # Non-200
+    # --------------------------------------------------------
+
+    if response.status_code != 200:
+        print(
+            f"[ERROR] Task002 HTTP "
+            f"{response.status_code}"
+        )
+
+        print(
+            response.text[:1000]
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # Get new ETag
+    # --------------------------------------------------------
+
+    new_etag = response.headers.get(
+        "ETag"
+    )
+
+    if new_etag:
+        print(
+            f"[INFO] New ETag: {new_etag}"
+        )
+
+        task_cache["etag"] = new_etag
+
+    else:
+        print(
+            "[WARN] API did not return ETag."
+        )
+
+    # --------------------------------------------------------
+    # Parse JSON
+    # --------------------------------------------------------
+
+    try:
+        data = response.json()
+
+    except ValueError as e:
+        print(
+            f"[ERROR] Task002 invalid JSON: {e}"
+        )
+        return
+
+    # --------------------------------------------------------
+    # Build encrypted snapshot
+    # --------------------------------------------------------
+
+    try:
+        new_snapshot = build_task002_snapshot(
+            data
+        )
+
+    except Exception as e:
+        print(
+            f"[ERROR] Cannot build Task002 snapshot: {e}"
+        )
+        return
+
+    print(
+        f"[INFO] Collections received: "
+        f"{len(new_snapshot)}"
+    )
+
+    # --------------------------------------------------------
+    # FIRST RUN
+    # --------------------------------------------------------
+
+    is_first_run = (
+        "collections" not in task_cache
+    )
+
+    if is_first_run:
+        print(
+            "[INFO] Task002 first run."
+        )
+
+        print(
+            "[INFO] Saving initial snapshot. "
+            "Nothing will be reported as Added."
+        )
+
+        task_cache["collections"] = (
+            new_snapshot
+        )
+
+        task_cache["last_fetch_date"] = (
+            datetime.now(THAI_TZ).isoformat()
+        )
+
+        save_cache(cache)
+
+        send_ntfy(
+            "\n".join([
+                "📸 Task002 Initial Snapshot",
+                "",
+                f"Collections: {len(new_snapshot)}",
+                "No content changes reported."
+            ])
+        )
+
+        return
+
+    # --------------------------------------------------------
+    # Compare
+    # --------------------------------------------------------
+
+    (
+        added_collections,
+        removed_collections,
+        added_contents,
+        removed_contents
+    ) = diff_collections(
+        previous_snapshot,
+        new_snapshot
+    )
+
+    print(
+        f"[INFO] Added collections: "
+        f"{len(added_collections)}"
+    )
+
+    print(
+        f"[INFO] Removed collections: "
+        f"{len(removed_collections)}"
+    )
+
+    print(
+        f"[INFO] Added contents: "
+        f"{len(added_contents)}"
+    )
+
+    print(
+        f"[INFO] Removed contents: "
+        f"{len(removed_contents)}"
+    )
+
+    # --------------------------------------------------------
+    # Notify
+    # --------------------------------------------------------
+
+    if (
+        added_collections
+        or removed_collections
+        or added_contents
+        or removed_contents
+    ):
+        notify_task002_changes(
+            added_collections,
+            removed_collections,
+            added_contents,
+            removed_contents,
+            new_snapshot
+        )
+
+    else:
+        print(
+            "[INFO] No collection/content changes."
+        )
+
+    # --------------------------------------------------------
+    # Save new snapshot
+    # --------------------------------------------------------
+
+    task_cache["collections"] = (
+        new_snapshot
+    )
+
+    task_cache["last_fetch_date"] = (
+        datetime.now(THAI_TZ).isoformat()
+    )
+
+    save_cache(cache)
+
+    print(
+        "[INFO] Task002 completed."
+    )
+
+
+# ============================================================
+# CLI
+# ============================================================
 
 def main():
-    print("Entering main()")
+    parser = argparse.ArgumentParser(
+        description="Anonymous refresh tasks"
+    )
 
-    # 1. รันระบบ DB เดิม
-    if not DATABASE_URL or not BASE_URL or not BASE_URL2:
-        print("❌ Missing DB/API env vars")
-    else:
-        print("Connecting to DB...")
-        conn = get_connection()
-        
-        if conn:
-            print("Fetching records...")
-            records = fetch_resolutions(conn)
-            print(f"Found {len(records)} records")
+    group = parser.add_mutually_exclusive_group()
 
-            for r in records:
-                anon_id = r["anonId"]
-                record_id = r["id"]
+    group.add_argument(
+        "--task0",
+        action="store_true",
+        help="Run Task 0 only"
+    )
 
-                try:
-                    print(f"Init Step 1 of {record_id}")
-                    url_fetch_anon_id = f"{BASE_URL2}/{anon_id}"
+    group.add_argument(
+        "--task001",
+        action="store_true",
+        help="Run Task 001 only"
+    )
 
-                    res2 = requests.get(url_fetch_anon_id, timeout=15, allow_redirects=False)
-                    if res2.status_code != 200:
-                        print(f"Skip {record_id} (status {res2.status_code})")
-                        continue
-                    
-                    print(f"Step 1 of {record_id} Passed!")
-                    data2 = res2.text
-                    
-                    print(f"Init Step 2 of {record_id}")
-                    anon_fetchid = extract_fetch_id(data2)
-                    
-                    if not anon_fetchid:
-                        print(f"Could not extract fetch id for {record_id}")
-                        continue
-                        
-                    print(f"Step 2 of {record_id} Passed!")
-                    
-                    url = f"{BASE_URL}/{anon_fetchid}"
-                    res = requests.get(url, timeout=15, allow_redirects=False)
+    group.add_argument(
+        "--task002",
+        action="store_true",
+        help="Run Task 002 only"
+    )
 
-                    if res.status_code != 200:
-                        print(f"Skip {record_id} API (status {res.status_code})")
-                        continue
-                        
-                    data = res.json()
-                    
-                    print(f"Update HLS record of {record_id}")
-                    if data.get("status") == "ok" and data.get("hls"):
-                        new_url = data["hls"]
-                        update_url(conn, record_id, new_url)
-                        print(f"Updated {record_id}")
-                    else:
-                        print(f"No hls for {record_id}")
+    group.add_argument(
+        "--all",
+        action="store_true",
+        help="Run all tasks"
+    )
 
-                except Exception as e:
-                    print(f"Error {record_id}: {e}")
+    args = parser.parse_args()
 
-                delay = random.randint(7, 15)
-                print(f"Sleeping {delay}s...")
-                time.sleep(delay)
+    # --------------------------------------------------------
+    # No argument => --all
+    # --------------------------------------------------------
 
-            conn.close()
+    if not any([
+        args.task0,
+        args.task001,
+        args.task002,
+        args.all
+    ]):
+        args.all = True
 
-    run_new_task()
+    # --------------------------------------------------------
+    # Execute
+    # --------------------------------------------------------
+
+    if args.all:
+        run_task_0()
+        run_task_001()
+        run_task_002()
+
+    elif args.task0:
+        run_task_0()
+
+    elif args.task001:
+        run_task_001()
+
+    elif args.task002:
+        run_task_002()
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
     main()
