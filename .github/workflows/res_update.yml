@@ -142,16 +142,15 @@ jobs:
           ENV_OREFERER: ${{ secrets.OREFERER }}
         run: python -u anonRefresh.py --task002
 
-      - name: Commit and push
+      - name: Commit and push task002 cache
         run: |
           git config user.name "github-actions"
-          git config user.email "actions@github.com"
-
-          git add fetch_cache.json || true
-
-          if git diff --cached --quiet; then
-            echo "No cache updates."
-          else
-            git commit -m "chore: task002 update cache $(date -u +"%Y-%m-%d %H:%M")"
-            git push
-          fi
+          git config user.email "github-actions@github.com"
+      
+          git pull --rebase origin main
+      
+          git add fetch_cache.json lastupdated.txt
+      
+          git diff --cached --quiet || git commit -m "chore: task002 update cache $(date '+%Y-%m-%d %H:%M')"
+      
+          git push origin main
