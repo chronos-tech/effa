@@ -79,9 +79,9 @@ jobs:
           THOST: ${{ secrets.THOST }}
           TPATH: ${{ secrets.TPATH }}
           NTFY_TTOPIC: ${{ secrets.NTFY_TTOPIC }}
-          ENV_OHOST: ${{ secrets.ENV_OHOST }}
-          ENV_OAPIKEY: ${{ secrets.ENV_OAPIKEY }}
-          ENV_OREFERER: ${{ secrets.ENV_OREFERER }}
+          ENV_OHOST: ${{ secrets.OHOST }}
+          ENV_OAPIKEY: ${{ secrets.OAPIKEY }}
+          ENV_OREFERER: ${{ secrets.OREFERER }}
         run: |
           python -u anonRefresh.py --task001
 
@@ -96,9 +96,9 @@ jobs:
           THOST: ${{ secrets.THOST }}
           TPATH: ${{ secrets.TPATH }}
           NTFY_TTOPIC: ${{ secrets.NTFY_TTOPIC }}
-          ENV_OHOST: ${{ secrets.ENV_OHOST }}
-          ENV_OAPIKEY: ${{ secrets.ENV_OAPIKEY }}
-          ENV_OREFERER: ${{ secrets.ENV_OREFERER }}
+          ENV_OHOST: ${{ secrets.OHOST }}
+          ENV_OAPIKEY: ${{ secrets.OAPIKEY }}
+          ENV_OREFERER: ${{ secrets.OREFERER }}
         run: |
           python -u anonRefresh.py --task002
 
