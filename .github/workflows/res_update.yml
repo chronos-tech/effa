@@ -2,19 +2,20 @@ name: Update Resolution URLs
 
 on:
   schedule:
-    - cron: "0 */3 * * *" # every 3 hours
+    - cron: "0 */3 * * *"
   workflow_dispatch:
 
 permissions:
   contents: write
 
+# ป้องกัน workflow สองรอบชนกันแล้ว push พร้อมกัน
 concurrency:
   group: update-resolution-urls
   cancel-in-progress: false
 
 jobs:
-  task0:
-    name: Task 0 - Resolution Refresh
+  update:
+    name: Run Task 0 → Task 001 → Task 002
     runs-on: ubuntu-latest
 
     steps:
@@ -33,6 +34,9 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      # =========================
+      # Task 0
+      # =========================
       - name: Run Task 0
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -41,11 +45,15 @@ jobs:
           THOST: ${{ secrets.THOST }}
           TPATH: ${{ secrets.TPATH }}
           NTFY_TTOPIC: ${{ secrets.NTFY_TTOPIC }}
-          ENV_OHOST: ${{ secrets.OHOST }}
-          ENV_OAPIKEY: ${{ secrets.OAPIKEY }}
-          ENV_OREFERER: ${{ secrets.OREFERER }}
-        run: python -u anonRefresh.py --task0
+          ENV_OHOST: ${{ secrets.ENV_OHOST }}
+          ENV_OAPIKEY: ${{ secrets.ENV_OAPIKEY }}
+          ENV_OREFERER: ${{ secrets.ENV_OREFERER }}
+        run: |
+          python -u anonRefresh.py --task0
 
+      # =========================
+      # Update lastupdated.txt
+      # =========================
       - name: Update lastupdated.txt
         run: |
           TODAY=$(TZ=Asia/Bangkok date +"%Y-%m-%d")
@@ -60,42 +68,9 @@ jobs:
             echo "$TODAY" > lastupdated.txt
           fi
 
-      - name: Commit and push
-        run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-
-          git add lastupdated.txt fetch_cache.json
-
-          if git diff --cached --quiet; then
-            echo "No updates needed."
-          else
-            git commit -m "chore: task0 refresh $(date -u +"%Y-%m-%d %H:%M")"
-            git push origin main
-          fi
-
-
-  task001:
-    name: Task 001 - Website Fetch
-    runs-on: ubuntu-latest
-    needs: task0
-
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-
+      # =========================
+      # Task 001
+      # =========================
       - name: Run Task 001
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -104,47 +79,15 @@ jobs:
           THOST: ${{ secrets.THOST }}
           TPATH: ${{ secrets.TPATH }}
           NTFY_TTOPIC: ${{ secrets.NTFY_TTOPIC }}
-          ENV_OHOST: ${{ secrets.OHOST }}
-          ENV_OAPIKEY: ${{ secrets.OAPIKEY }}
-          ENV_OREFERER: ${{ secrets.OREFERER }}
-        run: python -u anonRefresh.py --task001
-
-      - name: Commit and push
+          ENV_OHOST: ${{ secrets.ENV_OHOST }}
+          ENV_OAPIKEY: ${{ secrets.ENV_OAPIKEY }}
+          ENV_OREFERER: ${{ secrets.ENV_OREFERER }}
         run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
+          python -u anonRefresh.py --task001
 
-          git add fetch_cache.json
-
-          if git diff --cached --quiet; then
-            echo "No cache updates."
-          else
-            git commit -m "chore: task001 update cache $(date -u +"%Y-%m-%d %H:%M")"
-            git push origin main
-          fi
-
-
-  task002:
-    name: Task 002 - Collection Tracking
-    runs-on: ubuntu-latest
-    needs: task001
-
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
-
+      # =========================
+      # Task 002
+      # =========================
       - name: Run Task 002
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
@@ -153,21 +96,29 @@ jobs:
           THOST: ${{ secrets.THOST }}
           TPATH: ${{ secrets.TPATH }}
           NTFY_TTOPIC: ${{ secrets.NTFY_TTOPIC }}
-          ENV_OHOST: ${{ secrets.OHOST }}
-          ENV_OAPIKEY: ${{ secrets.OAPIKEY }}
-          ENV_OREFERER: ${{ secrets.OREFERER }}
-        run: python -u anonRefresh.py --task002
+          ENV_OHOST: ${{ secrets.ENV_OHOST }}
+          ENV_OAPIKEY: ${{ secrets.ENV_OAPIKEY }}
+          ENV_OREFERER: ${{ secrets.ENV_OREFERER }}
+        run: |
+          python -u anonRefresh.py --task002
 
+      # =========================
+      # Commit & Push once
+      # =========================
       - name: Commit and push
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
 
-          git add fetch_cache.json
+          git add fetch_cache.json lastupdated.txt
 
           if git diff --cached --quiet; then
-            echo "No cache updates."
+            echo "No updates needed."
           else
-            git commit -m "chore: task002 update cache $(date -u +"%Y-%m-%d %H:%M")"
+            git commit -m "chore: update cache $(date -u +"%Y-%m-%d %H:%M")"
+
+            # Sync with remote before pushing in case main changed
+            git pull --rebase origin main
+
             git push origin main
           fi
