@@ -870,10 +870,16 @@
         }
       ]
     },
-    "last_fetch_date": "2026-09-07T09:40:09.489886+07:00"
+    "last_fetch_date": "2026-09-07T14:52:43.749547+07:00"
   },
   "task001": {
-    "last_hash": "3f86983cddb49b5c50d9a8313448fc1eab0dcf7d67e34c03a82e5065c9cb109b",
-    "last_fetch_date": "2026-09-06"
+    "last_hash": "449a947621c93b345adc5d88993ce74975bdb3ca93cc34ba9eee3cb9af63ab9b",
+    "last_fetch_date": "2026-09-07",
+    "history": [
+      {
+        "date": "2026-09-07",
+        "hash": "449a947621c93b345adc5d88993ce74975bdb3ca93cc34ba9eee3cb9af63ab9b"
+      }
+    ]
   }
 }
