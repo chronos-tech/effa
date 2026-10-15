@@ -11,7 +11,7 @@ import json
 from datetime import datetime, timezone, timedelta
 from psycopg2.extras import RealDictCursor
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
+from bs4 import BeautifulSoup
 
 # ============================================================
 # ENV
@@ -1230,6 +1230,135 @@ def run_task_002():
 
 
 # ============================================================
+# TASK 003 - Monitor A_H / B_H textContent using SHA256
+# ============================================================
+
+def extract_text_content(html, selector, remove_spaces=False):
+    soup = BeautifulSoup(html, "html.parser")
+    element = soup.select_one(selector)
+
+    if element is None:
+        raise ValueError(f"Selector not found: {selector}")
+
+    content = element.get_text()
+
+    if remove_spaces:
+        content = content.replace(" ", "")
+
+    return content
+
+
+def run_task_003():
+    print("=" * 60)
+    print("TASK 003 - Monitor A_H / B_H")
+    print("=" * 60)
+
+    targets = [
+        {
+            "key": "A_H",
+            "url": os.getenv("URL_A_H"),
+            "selector": "header.clearfix h1 a",
+            "remove_spaces": True,
+            "domain": "3x domain",
+        },
+        {
+            "key": "B_H",
+            "url": os.getenv("URL_B_H"),
+            "selector": ".stitle",
+            "remove_spaces": False,
+            "domain": "down domain",
+        },
+    ]
+
+    cache = load_cache()
+    task_cache = cache.setdefault("task003", {})
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        )
+    }
+
+    session = requests.Session()
+    cache_changed = False
+
+    for target in targets:
+        key = target["key"]
+        url = target["url"]
+
+        if not url:
+            print(f"[WARN] {key}: URL is not configured.")
+            continue
+
+        print(f"[INFO] Checking {key}")
+
+        try:
+            response = session.get(
+                url,
+                headers=headers,
+                timeout=30,
+            )
+            response.raise_for_status()
+
+            content = extract_text_content(
+                response.text,
+                target["selector"],
+                target["remove_spaces"],
+            )
+
+            content_hash = hashlib.sha256(
+                content.encode("utf-8")
+            ).hexdigest()
+
+            previous_hash = task_cache.get(key, {}).get("content_hash")
+
+            print(f"[INFO] {key} hash: {content_hash}")
+
+            # First run: save baseline without reporting new arrival.
+            if previous_hash is None:
+                task_cache[key] = {
+                    "content_hash": content_hash,
+                }
+                cache_changed = True
+                print(f"[INFO] {key}: Initial hash saved.")
+                continue
+
+            # Same content: no notification.
+            if content_hash == previous_hash:
+                print(f"[INFO] {key}: Content unchanged.")
+                continue
+
+            # Changed content: notify and update hash.
+            message = f"New mag arrival on {target['domain']}"
+
+            send_ntfy(message)
+
+            task_cache[key] = {
+                "content_hash": content_hash,
+            }
+            cache_changed = True
+
+            print(f"[OK] {key}: Content changed; notification sent.")
+
+        except requests.RequestException as e:
+            print(f"[ERROR] {key}: HTTP request failed: {e}")
+
+        except Exception as e:
+            print(f"[ERROR] {key}: {e}")
+
+    if cache_changed:
+        save_cache(cache)
+
+    print("[INFO] Task 003 completed.")
+
+
+
+
+
+
+# ============================================================
 # CLI
 # ============================================================
 
@@ -1257,7 +1386,11 @@ def main():
         action="store_true",
         help="Run Task 002 only"
     )
-
+    group.add_argument(
+        "--task003",
+        action="store_true",
+        help="Run Task 003 only",
+    )
     group.add_argument(
         "--all",
         action="store_true",
@@ -1274,7 +1407,8 @@ def main():
         args.task0,
         args.task001,
         args.task002,
-        args.all
+        args.task003,
+        args.all,
     ]):
         args.all = True
 
@@ -1295,6 +1429,8 @@ def main():
 
     elif args.task002:
         run_task_002()
+    elif args.task003:
+        run_task_003()
 
 
 # ============================================================
