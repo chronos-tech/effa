@@ -48,6 +48,8 @@ jobs:
           ENV_OHOST: ${{ secrets.OHOST }}
           ENV_OAPIKEY: ${{ secrets.OAPIKEY }}
           ENV_OREFERER: ${{ secrets.OREFERER }}
+          URL_A_H: ${{ secrets.URL_A_H }}
+          URL_B_H: ${{ secrets.URL_B_H }}
         run: |
           python -u anonRefresh.py --task0
 
@@ -82,6 +84,8 @@ jobs:
           ENV_OHOST: ${{ secrets.OHOST }}
           ENV_OAPIKEY: ${{ secrets.OAPIKEY }}
           ENV_OREFERER: ${{ secrets.OREFERER }}
+          URL_A_H: ${{ secrets.URL_A_H }}
+          URL_B_H: ${{ secrets.URL_B_H }}
         run: |
           python -u anonRefresh.py --task001
 
@@ -99,8 +103,28 @@ jobs:
           ENV_OHOST: ${{ secrets.OHOST }}
           ENV_OAPIKEY: ${{ secrets.OAPIKEY }}
           ENV_OREFERER: ${{ secrets.OREFERER }}
+          URL_A_H: ${{ secrets.URL_A_H }}
+          URL_B_H: ${{ secrets.URL_B_H }}
         run: |
           python -u anonRefresh.py --task002
+      # =========================
+      # Task 003
+      # =========================
+      - name: Run Task 003
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          API_BASE_URL2: ${{ secrets.API_BASE_URL2 }}
+          THOST: ${{ secrets.THOST }}
+          TPATH: ${{ secrets.TPATH }}
+          NTFY_TTOPIC: ${{ secrets.NTFY_TTOPIC }}
+          ENV_OHOST: ${{ secrets.OHOST }}
+          ENV_OAPIKEY: ${{ secrets.OAPIKEY }}
+          ENV_OREFERER: ${{ secrets.OREFERER }}
+          URL_A_H: ${{ secrets.URL_A_H }}
+          URL_B_H: ${{ secrets.URL_B_H }}
+        run: |
+          python -u anonRefresh.py --task003
 
       # =========================
       # Commit & Push once
