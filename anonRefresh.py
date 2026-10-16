@@ -1456,6 +1456,14 @@ def run_task_003():
             "remove_spaces": False,
             "domain": "mag down",
         },
+        {
+            "key": "D_H",
+            "url": os.getenv("URL_D_H"),
+            "selector": ".entry-title",
+            "index": 0,
+            "remove_spaces": False,
+            "domain": "ad mag pdf",
+        },
     ]
 
     cache = load_cache()
