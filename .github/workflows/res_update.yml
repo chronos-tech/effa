@@ -53,7 +53,7 @@ jobs:
           URL_A_H: ${{ secrets.URL_A_H }}
           URL_B_H: ${{ secrets.URL_B_H }}
           URL_C_H: ${{ secrets.URL_C_H }}
-          NTFY_TOPIC_HTB: ${{ secrets.NTFY_TTOPIC_HTB }}
+          NTFY_TTOPIC_HTB: ${{ secrets.NTFY_TTOPIC_HTB }}
         run: |
           python -u anonRefresh.py --task0
 
@@ -91,7 +91,7 @@ jobs:
           URL_A_H: ${{ secrets.URL_A_H }}
           URL_B_H: ${{ secrets.URL_B_H }}
           URL_C_H: ${{ secrets.URL_C_H }}
-          NTFY_TOPIC_HTB: ${{ secrets.NTFY_TTOPIC_HTB }}
+          NTFY_TTOPIC_HTB: ${{ secrets.NTFY_TTOPIC_HTB }}
         run: |
           python -u anonRefresh.py --task001
 
@@ -112,7 +112,7 @@ jobs:
           URL_A_H: ${{ secrets.URL_A_H }}
           URL_B_H: ${{ secrets.URL_B_H }}
           URL_C_H: ${{ secrets.URL_C_H }}
-          NTFY_TOPIC_HTB: ${{ secrets.NTFY_TTOPIC_HTB }}
+          NTFY_TTOPIC_HTB: ${{ secrets.NTFY_TTOPIC_HTB }}
         run: |
           python -u anonRefresh.py --task002
       # =========================
@@ -132,7 +132,7 @@ jobs:
           URL_A_H: ${{ secrets.URL_A_H }}
           URL_B_H: ${{ secrets.URL_B_H }}
           URL_C_H: ${{ secrets.URL_C_H }}
-          NTFY_TOPIC_HTB: ${{ secrets.NTFY_TTOPIC_HTB }}
+          NTFY_TTOPIC_HTB: ${{ secrets.NTFY_TTOPIC_HTB }}
         run: |
           python -u anonRefresh.py --task003
 
