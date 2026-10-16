@@ -27,6 +27,9 @@ TPATH = os.getenv("TPATH")
 
 NTFY_TTOPIC = os.getenv("NTFY_TTOPIC")
 
+# Task 003 only
+NTFY_TTOPIC_HTB = os.getenv("NTFY_TTOPIC_HTB")
+
 # Task 002
 OHOST = os.getenv("ENV_OHOST")
 OAPIKEY = os.getenv("ENV_OAPIKEY")
@@ -104,6 +107,34 @@ def send_ntfy(message):
 
     except requests.RequestException as e:
         print(f"[WARN] ntfy error: {e}")
+
+
+def send_ntfy_htb(message):
+    """
+    Task 003 only.
+    Posts to NTFY_TTOPIC_HTB. No fallback to NTFY_TTOPIC.
+    """
+    if not NTFY_TTOPIC_HTB:
+        print("[WARN] NTFY_TTOPIC_HTB is not configured.")
+        return
+
+    try:
+        response = requests.post(
+            NTFY_TTOPIC_HTB,
+            data=message.encode("utf-8"),
+            timeout=20
+        )
+
+        if response.status_code >= 400:
+            print(
+                f"[WARN] ntfy_htb failed: "
+                f"{response.status_code} {response.text}"
+            )
+        else:
+            print("[INFO] ntfy_htb sent.")
+
+    except requests.RequestException as e:
+        print(f"[WARN] ntfy_htb error: {e}")
 
 
 # ============================================================
@@ -1230,17 +1261,26 @@ def run_task_002():
 
 
 # ============================================================
-# TASK 003 - Monitor A_H / B_H textContent using SHA256
+# TASK 003 - Monitor A_H / B_H / C_H textContent using SHA256
+# All notifications go to NTFY_TTOPIC_HTB (one combined msg)
 # ============================================================
 
-def extract_text_content(html, selector, remove_spaces=False):
+def extract_text_content(html, selector, remove_spaces=False, index=0):
+    """
+    index=0 behaves like select_one / querySelector.
+    index=1 behaves like querySelectorAll(selector)[1].
+    get_text() matches JS textContent.
+    """
     soup = BeautifulSoup(html, "html.parser")
-    element = soup.select_one(selector)
+    elements = soup.select(selector)
 
-    if element is None:
-        raise ValueError(f"Selector not found: {selector}")
+    if index >= len(elements):
+        raise ValueError(
+            f"Selector not found: {selector} "
+            f"(index {index}, found {len(elements)})"
+        )
 
-    content = element.get_text()
+    content = elements[index].get_text()
 
     if remove_spaces:
         content = content.replace(" ", "")
@@ -1250,7 +1290,7 @@ def extract_text_content(html, selector, remove_spaces=False):
 
 def run_task_003():
     print("=" * 60)
-    print("TASK 003 - Monitor A_H / B_H")
+    print("TASK 003 - Monitor A_H / B_H / C_H")
     print("=" * 60)
 
     targets = [
@@ -1258,6 +1298,7 @@ def run_task_003():
             "key": "A_H",
             "url": os.getenv("URL_A_H"),
             "selector": "header.clearfix h1 a",
+            "index": 0,
             "remove_spaces": True,
             "domain": "3x domain",
         },
@@ -1265,8 +1306,17 @@ def run_task_003():
             "key": "B_H",
             "url": os.getenv("URL_B_H"),
             "selector": ".stitle",
+            "index": 0,
             "remove_spaces": False,
             "domain": "down domain",
+        },
+        {
+            "key": "C_H",
+            "url": os.getenv("URL_C_H"),
+            "selector": ".posttitle",
+            "index": 1,
+            "remove_spaces": False,
+            "domain": "mag down",
         },
     ]
 
@@ -1284,12 +1334,23 @@ def run_task_003():
     session = requests.Session()
     cache_changed = False
 
+    # One result per target.
+    # status: changed | nochange | initial | error
+    results = []
+
     for target in targets:
         key = target["key"]
         url = target["url"]
+        domain = target["domain"]
 
         if not url:
             print(f"[WARN] {key}: URL is not configured.")
+
+            results.append({
+                "domain": domain,
+                "status": "error",
+                "detail": "URL is not configured",
+            })
             continue
 
         print(f"[INFO] Checking {key}")
@@ -1306,6 +1367,7 @@ def run_task_003():
                 response.text,
                 target["selector"],
                 target["remove_spaces"],
+                target["index"],
             )
 
             content_hash = hashlib.sha256(
@@ -1316,46 +1378,104 @@ def run_task_003():
 
             print(f"[INFO] {key} hash: {content_hash}")
 
-            # First run: save baseline without reporting new arrival.
+            # First run: save baseline.
             if previous_hash is None:
                 task_cache[key] = {
                     "content_hash": content_hash,
                 }
                 cache_changed = True
+
                 print(f"[INFO] {key}: Initial hash saved.")
+
+                results.append({
+                    "domain": domain,
+                    "status": "initial",
+                    "detail": content.strip(),
+                })
                 continue
 
-            # Same content: no notification.
+            # Same content.
             if content_hash == previous_hash:
                 print(f"[INFO] {key}: Content unchanged.")
+
+                results.append({
+                    "domain": domain,
+                    "status": "nochange",
+                    "detail": content.strip(),
+                })
                 continue
 
-            # Changed content: notify and update hash.
-            message = f"New mag arrival on {target['domain']}"
-
-            send_ntfy(message)
-
+            # Changed content.
             task_cache[key] = {
                 "content_hash": content_hash,
             }
             cache_changed = True
 
-            print(f"[OK] {key}: Content changed; notification sent.")
+            print(f"[OK] {key}: Content changed.")
+
+            results.append({
+                "domain": domain,
+                "status": "changed",
+                "detail": content.strip(),
+            })
 
         except requests.RequestException as e:
             print(f"[ERROR] {key}: HTTP request failed: {e}")
 
+            results.append({
+                "domain": domain,
+                "status": "error",
+                "detail": f"HTTP request failed: {e}",
+            })
+
         except Exception as e:
             print(f"[ERROR] {key}: {e}")
+
+            results.append({
+                "domain": domain,
+                "status": "error",
+                "detail": str(e),
+            })
 
     if cache_changed:
         save_cache(cache)
 
+    # --------------------------------------------------------
+    # One combined ntfy message -> NTFY_TTOPIC_HTB
+    # --------------------------------------------------------
+
+    all_nochange = all(
+        r["status"] == "nochange" for r in results
+    )
+
+    if all_nochange:
+        lines = ["✅ Task003: no change", ""]
+    else:
+        lines = ["🔔 Task003: update", ""]
+
+    for r in results:
+        domain = r["domain"]
+        detail = r["detail"]
+
+        if r["status"] == "changed":
+            lines.append(f"🆕 New mag arrival on {domain}")
+            lines.append(f"   Title: {detail}")
+
+        elif r["status"] == "nochange":
+            lines.append(f"✅ {domain}: no change")
+            lines.append(f"   Title: {detail}")
+
+        elif r["status"] == "initial":
+            lines.append(f"📸 {domain}: initial snapshot saved")
+            lines.append(f"   Title: {detail}")
+
+        else:
+            lines.append(f"❌ {domain}: error")
+            lines.append(f"   {detail}")
+
+    send_ntfy_htb("\n".join(lines))
+
     print("[INFO] Task 003 completed.")
-
-
-
-
 
 
 # ============================================================
@@ -1386,11 +1506,13 @@ def main():
         action="store_true",
         help="Run Task 002 only"
     )
+
     group.add_argument(
         "--task003",
         action="store_true",
         help="Run Task 003 only",
     )
+
     group.add_argument(
         "--all",
         action="store_true",
@@ -1420,6 +1542,7 @@ def main():
         run_task_0()
         run_task_001()
         run_task_002()
+        run_task_003()
 
     elif args.task0:
         run_task_0()
@@ -1429,6 +1552,7 @@ def main():
 
     elif args.task002:
         run_task_002()
+
     elif args.task003:
         run_task_003()
 
