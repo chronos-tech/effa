@@ -13,6 +13,23 @@ from psycopg2.extras import RealDictCursor
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from bs4 import BeautifulSoup
 
+try:
+    from curl_cffi import requests as curl_requests
+except ImportError:
+    curl_requests = None
+ 
+try:
+    import cloudscraper
+except ImportError:
+    cloudscraper = None
+ 
+try:
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options as ChromeOptions
+except ImportError:
+    webdriver = None
+    ChromeOptions = None
+
 # ============================================================
 # ENV
 # ============================================================
@@ -1288,6 +1305,127 @@ def extract_text_content(html, selector, remove_spaces=False, index=0):
     return content
 
 
+def fetch_html_requests(url, headers):
+    response = requests.get(
+        url,
+        headers=headers,
+        timeout=30,
+    )
+    response.raise_for_status()
+ 
+    return response.text
+ 
+ 
+def fetch_html_curl_cffi(url, headers):
+    if curl_requests is None:
+        raise RuntimeError("curl_cffi is not installed")
+ 
+    # impersonate sets browser-like TLS + headers,
+    # so do not override with custom User-Agent.
+    response = curl_requests.get(
+        url,
+        impersonate="chrome",
+        timeout=30,
+    )
+    response.raise_for_status()
+ 
+    return response.text
+ 
+ 
+def fetch_html_cloudscraper(url, headers):
+    if cloudscraper is None:
+        raise RuntimeError("cloudscraper is not installed")
+ 
+    scraper = cloudscraper.create_scraper(
+        browser={
+            "browser": "chrome",
+            "platform": "windows",
+            "desktop": True,
+        }
+    )
+ 
+    response = scraper.get(
+        url,
+        timeout=30,
+    )
+    response.raise_for_status()
+ 
+    return response.text
+ 
+ 
+def fetch_html_selenium(url, headers):
+    if webdriver is None:
+        raise RuntimeError("selenium is not installed")
+ 
+    options = ChromeOptions()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1366,768")
+    options.add_argument(
+        f"--user-agent={headers.get('User-Agent', '')}"
+    )
+ 
+    driver = webdriver.Chrome(options=options)
+ 
+    try:
+        driver.set_page_load_timeout(60)
+        driver.get(url)
+ 
+        # Give JS / challenge page time to finish.
+        time.sleep(6)
+ 
+        return driver.page_source
+ 
+    finally:
+        driver.quit()
+ 
+ 
+FETCH_METHODS = [
+    ("requests", fetch_html_requests),
+    ("curl_cffi", fetch_html_curl_cffi),
+    ("cloudscraper", fetch_html_cloudscraper),
+    ("selenium", fetch_html_selenium),
+]
+ 
+ 
+def fetch_content_with_fallback(url, target, headers):
+    """
+    Try each fetch method in order.
+ 
+    A method counts as success only if the selector is found
+    in the returned HTML. So a 200 challenge page (no selector)
+    also falls through to the next method.
+ 
+    Returns (content, method_name).
+    Raises RuntimeError with all errors if every method fails.
+    """
+    errors = []
+ 
+    for name, fetch_html in FETCH_METHODS:
+        try:
+            html = fetch_html(url, headers)
+ 
+            content = extract_text_content(
+                html,
+                target["selector"],
+                target["remove_spaces"],
+                target["index"],
+            )
+ 
+            return content, name
+ 
+        except Exception as e:
+            print(f"[WARN] {target['key']}: {name} failed: {e}")
+            errors.append(f"{name}: {e}")
+ 
+    raise RuntimeError(
+        "All fetch methods failed | " + " | ".join(errors)
+    )
+ 
+ 
+
 def run_task_003():
     print("=" * 60)
     print("TASK 003 - Monitor A_H / B_H / C_H")
@@ -1356,19 +1494,13 @@ def run_task_003():
         print(f"[INFO] Checking {key}")
 
         try:
-            response = session.get(
+            content, method = fetch_content_with_fallback(
                 url,
-                headers=headers,
-                timeout=30,
+                target,
+                headers,
             )
-            response.raise_for_status()
 
-            content = extract_text_content(
-                response.text,
-                target["selector"],
-                target["remove_spaces"],
-                target["index"],
-            )
+            print(f"[INFO] {key}: fetched via {method}")
 
             content_hash = hashlib.sha256(
                 content.encode("utf-8")
