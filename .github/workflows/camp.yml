@@ -1,0 +1,52 @@
+
+name: Camp Gallery Backup
+
+on:
+  repository_dispatch:
+    types: [camp_cron]
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: camp-gallery-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      API_URL: ${{ secrets.API_URL }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      NTFY_URL: ${{ secrets.NTFY_URL }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run backup
+        run: python camp.py
+
+      - name: Commit upload history
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add data/uploaded.json
+
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: update gallery backup history"
+            git push
+          else
+            echo "No history changes."
+          fi
