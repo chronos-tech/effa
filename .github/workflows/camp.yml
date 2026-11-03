@@ -20,9 +20,9 @@ jobs:
     timeout-minutes: 30
 
     env:
-      API_URL: ${{ secrets.API_URL }}
-      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-      NTFY_URL: ${{ secrets.NTFY_URL }}
+      API_URL: ${{ secrets.API_URL_CAMP }}
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL_CAMP }}
+      NTFY_URL: ${{ secrets.NTFY_URL_CAMP }}
 
     steps:
       - name: Checkout repository
