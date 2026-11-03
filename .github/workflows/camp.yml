@@ -25,6 +25,7 @@ jobs:
       API_URL: ${{ secrets.API_URL_CAMP }}
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL_CAMP }}
       NTFY_URL: ${{ secrets.NTFY_URL_CAMP }}
+      GALLERY_COOKIE: ${{ secrets.GALLERY_COOKIE_CAMP }}
 
     steps:
       - name: Checkout repository
