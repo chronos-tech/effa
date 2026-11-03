@@ -428,91 +428,37 @@ def download_photo(image_path):
 # ============================================================
 
 def upload_discord(content, filename, album):
-    boundary = "----CampBoundary" + uuid.uuid4().hex
+    boundary = uuid.uuid4().hex
+    payload = json.dumps({"content": f"Album {album}"})
 
-    payload = {
-        "content": (
-            f"📸 Gallery Backup\n"
-            f"Album: {album.get('name', 'Unknown')}\n"
-            f"Album ID: {album.get('id', 'Unknown')}"
-        )
-    }
+    body = b"".join([
+        f"--{boundary}\r\n".encode(),
+        b'Content-Disposition: form-data; name="payload_json"\r\n',
+        b"Content-Type: application/json\r\n\r\n",
+        payload.encode(), b"\r\n",
+        f"--{boundary}\r\n".encode(),
+        f'Content-Disposition: form-data; name="files[0]"; filename="{filename}"\r\n'.encode(),
+        b"Content-Type: application/octet-stream\r\n\r\n",
+        content, b"\r\n",
+        f"--{boundary}--\r\n".encode(),
+    ])
 
-    parts = []
-
-    def add(value):
-        parts.append(value.encode("utf-8"))
-
-    add(f"--{boundary}\r\n")
-    add(
-        'Content-Disposition: form-data; '
-        'name="payload_json"\r\n'
-    )
-    add("Content-Type: application/json\r\n\r\n")
-    add(json.dumps(payload, ensure_ascii=False))
-    add("\r\n")
-
-    safe_filename = filename.replace('"', "_")
-
-    add(f"--{boundary}\r\n")
-    add(
-        'Content-Disposition: form-data; '
-        f'name="files[0]"; filename="{safe_filename}"\r\n'
-    )
-    add("Content-Type: application/octet-stream\r\n\r\n")
-
-    parts.append(content)
-
-    add("\r\n")
-    add(f"--{boundary}--\r\n")
-
-    body = b"".join(parts)
-
-    parsed = urllib.parse.urlsplit(
-        DISCORD_WEBHOOK_URL
-    )
-
-    query = urllib.parse.parse_qsl(
-        parsed.query,
-        keep_blank_values=True
-    )
-
-    query = [
-        (key, value)
-        for key, value in query
-        if key != "wait"
-    ]
-
-    query.append(("wait", "true"))
-
-    webhook_url = urllib.parse.urlunsplit((
-        parsed.scheme,
-        parsed.netloc,
-        parsed.path,
-        urllib.parse.urlencode(query),
-        parsed.fragment
-    ))
-
-    _, _, response = request(
-        webhook_url,
+    req = urllib.request.Request(
+        DISCORD_WEBHOOK_URL + "?wait=true",   # wait=true → ได้ id กลับมา
+        data=body,
         method="POST",
         headers={
-            "Content-Type": (
-                f"multipart/form-data; boundary={boundary}"
-            ),
-            "Content-Length": str(len(body))
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "User-Agent": "DiscordBot (camp-gallery-backup, 1.0)",  # สำคัญสุด
+            "Accept": "application/json",
         },
-        body=body
     )
-
-    result = json.loads(response)
-
-    if not result.get("id"):
-        raise RuntimeError(
-            "Discord did not return message ID"
-        )
-
-    return result
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.loads(r.read())
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")[:500]
+        raise RuntimeError(f"Discord HTTP {e.code}: {detail}") from e
 
 
 # ============================================================
