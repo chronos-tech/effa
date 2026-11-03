@@ -1,4 +1,61 @@
 {
   "resetVersion": 1793416448040,
-  "uploaded": {}
+  "uploaded": {
+    "a038087d-fc28-43ee-8a1e-b2cb8f701dfb": {
+      "albumId": 319,
+      "albumName": "ครูวิชญ์",
+      "filename": "a038087d-fc28-43ee-8a1e-b2cb8f701dfb.jpg",
+      "discordMessageId": "1567321277612425390",
+      "uploadedAt": "2026-11-04T06:35:12.432736+07:00"
+    },
+    "a86065b1-f670-4acd-9679-6b5bb0a4c42a": {
+      "albumId": 315,
+      "albumName": "ครูวิชญ์",
+      "filename": "a86065b1-f670-4acd-9679-6b5bb0a4c42a.jpg",
+      "discordMessageId": "1567321295174242395",
+      "uploadedAt": "2026-11-04T06:35:16.752686+07:00"
+    },
+    "fa9aea92-d0c1-447e-88b0-e876559916a3": {
+      "albumId": 312,
+      "albumName": "ครูวิชญ์",
+      "filename": "fa9aea92-d0c1-447e-88b0-e876559916a3.jpg",
+      "discordMessageId": "1567321308356677712",
+      "uploadedAt": "2026-11-04T06:35:19.537304+07:00"
+    },
+    "cf4980bf-b1ec-4d84-9a5a-43bd04176125": {
+      "albumId": 264,
+      "albumName": "ครูวิชญ์",
+      "filename": "cf4980bf-b1ec-4d84-9a5a-43bd04176125.png",
+      "discordMessageId": "1567321321635844152",
+      "uploadedAt": "2026-11-04T06:35:24.219857+07:00"
+    },
+    "d2ab3e44-0081-4168-aed6-cb32090c7282": {
+      "albumId": 261,
+      "albumName": "ครูวิชญ์",
+      "filename": "d2ab3e44-0081-4168-aed6-cb32090c7282.png",
+      "discordMessageId": "1567321343572050040",
+      "uploadedAt": "2026-11-04T06:35:28.187381+07:00"
+    },
+    "bab27ff8-254d-4033-85b1-c2757e362f57": {
+      "albumId": 260,
+      "albumName": "ครูวิชญ์",
+      "filename": "bab27ff8-254d-4033-85b1-c2757e362f57.png",
+      "discordMessageId": "1567321358373752903",
+      "uploadedAt": "2026-11-04T06:35:33.541994+07:00"
+    },
+    "e7317d2c-b456-4b3c-872c-8b914027d53d": {
+      "albumId": 191,
+      "albumName": "ครูวิชญ์",
+      "filename": "e7317d2c-b456-4b3c-872c-8b914027d53d.png",
+      "discordMessageId": "1567321380209557504",
+      "uploadedAt": "2026-11-04T06:35:36.734700+07:00"
+    },
+    "cc431e98-b824-4ab8-92b3-6e478559cffe": {
+      "albumId": 107,
+      "albumName": "ครูวิชญ์",
+      "filename": "cc431e98-b824-4ab8-92b3-6e478559cffe.jpg",
+      "discordMessageId": "1567321393241128991",
+      "uploadedAt": "2026-11-04T06:35:39.847120+07:00"
+    }
+  }
 }
