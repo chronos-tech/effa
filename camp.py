@@ -1,4 +1,3 @@
-
 import os
 import re
 import json
@@ -19,18 +18,17 @@ from zoneinfo import ZoneInfo
 # Configuration
 # ============================================================
 
-API_URL = os.environ["API_URL"]
-DISCORD_WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
-NTFY_URL = os.environ["NTFY_URL"]
-
-CACHE_FILE = Path("cache.json")
+API_URL = os.environ.get("API_URL", "").strip()
+DISCORD_WEBHOOK_URL = os.environ.get(
+    "DISCORD_WEBHOOK_URL", ""
+).strip()
+NTFY_URL = os.environ.get("NTFY_URL", "").strip()
 GALLERY_COOKIE = os.environ.get("GALLERY_COOKIE", "").strip()
 
-if not GALLERY_COOKIE:
-    raise RuntimeError("GALLERY_COOKIE secret is missing")
-
+CACHE_FILE = Path("cache.json")
 
 TIMEZONE = ZoneInfo("Asia/Bangkok")
+
 REQUEST_TIMEOUT = 60
 MAX_RETRIES = 5
 UPLOAD_DELAY = 1
@@ -39,7 +37,18 @@ BROWSER_HEADERS = {
     "Accept": "*/*",
     "Accept-Language": "en,th;q=0.9,en-US;q=0.8,en-GB;q=0.7",
     "Cookie": GALLERY_COOKIE,
+    "Priority": "u=1, i",
     "Referer": "https://m2talk.akkawit.com/",
+    "Sec-CH-UA": (
+        '"Not:A-Brand";v="8", '
+        '"Chromium";v="156", '
+        '"Microsoft Edge";v="156"'
+    ),
+    "Sec-CH-UA-Mobile": "?0",
+    "Sec-CH-UA-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-origin",
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -56,6 +65,15 @@ UUID_PATTERN = re.compile(
 
 
 # ============================================================
+# Exceptions
+# ============================================================
+
+class CookieAuthenticationError(Exception):
+    """Gallery authentication failed (401/403)."""
+    pass
+
+
+# ============================================================
 # HTTP
 # ============================================================
 
@@ -65,25 +83,36 @@ def retry_delay(headers, attempt):
     if value:
         try:
             return min(float(value), 120)
+
         except ValueError:
             try:
                 retry_date = parsedate_to_datetime(value)
+
                 return min(
                     max(
-                        (retry_date - datetime.now(
-                            retry_date.tzinfo
-                        )).total_seconds(),
+                        (
+                            retry_date - datetime.now(
+                                retry_date.tzinfo
+                            )
+                        ).total_seconds(),
                         1
                     ),
                     120
                 )
+
             except (ValueError, TypeError):
                 pass
 
     return min(2 ** attempt, 60)
 
 
-def request(url, method="GET", headers=None, body=None):
+def request(
+    url,
+    method="GET",
+    headers=None,
+    body=None,
+    gallery_request=False
+):
     headers = headers or {}
 
     for attempt in range(MAX_RETRIES + 1):
@@ -106,8 +135,19 @@ def request(url, method="GET", headers=None, body=None):
                 )
 
         except urllib.error.HTTPError as error:
-            # POST is not automatically retried on 5xx.
-            # Discord may have accepted the upload already.
+
+            # Only classify 401/403 as gallery authentication
+            # failures when the request is to the gallery.
+            if gallery_request and error.code in (401, 403):
+                raise CookieAuthenticationError(
+                    f"Gallery authentication rejected "
+                    f"(HTTP {error.code}). "
+                    "Cookie may be expired, invalid, or blocked "
+                    "by Cloudflare."
+                ) from error
+
+            # Retry HTTP 429 and GET 5xx responses.
+            # Do not automatically retry Discord POST 5xx.
             retryable = (
                 error.code == 429
                 or (
@@ -132,6 +172,7 @@ def request(url, method="GET", headers=None, body=None):
             TimeoutError,
             ConnectionError
         ) as error:
+
             # Retrying POST after a connection failure can
             # produce duplicate Discord messages.
             if method != "GET" or attempt >= MAX_RETRIES:
@@ -149,12 +190,13 @@ def request(url, method="GET", headers=None, body=None):
 
 
 def get_json(url):
+    headers = dict(BROWSER_HEADERS)
+    headers["Accept"] = "application/json"
+
     _, _, body = request(
         url,
-        headers={
-            "Accept": "application/json",
-            "User-Agent": BROWSER_HEADERS["User-Agent"]
-        }
+        headers=headers,
+        gallery_request=True
     )
 
     return json.loads(body)
@@ -174,8 +216,13 @@ def load_cache():
     with CACHE_FILE.open("r", encoding="utf-8") as file:
         cache = json.load(file)
 
-    if not isinstance(cache.get("uploaded"), dict):
+    if not isinstance(cache, dict):
         raise ValueError("Invalid cache.json")
+
+    if not isinstance(cache.get("uploaded"), dict):
+        raise ValueError("Invalid cache.json: uploaded must be an object")
+
+    cache.setdefault("resetVersion", None)
 
     return cache
 
@@ -190,6 +237,7 @@ def save_cache(cache):
             ensure_ascii=False,
             indent=2
         )
+
         file.write("\n")
 
     temporary.replace(CACHE_FILE)
@@ -209,7 +257,9 @@ def get_image_id(image_url):
     match = UUID_PATTERN.search(key)
 
     if not match:
-        raise ValueError("Cannot extract UUID from photo key")
+        raise ValueError(
+            "Cannot extract UUID from photo key"
+        )
 
     return match.group(1).lower()
 
@@ -250,20 +300,30 @@ def get_gallery():
     albums = []
     visited_cursors = set()
     before = None
+    metadata = {}
 
     while True:
         url = build_gallery_url(before)
 
-        print(f"[Gallery] Fetching page: {before or 'first'}")
+        print(
+            f"[Gallery] Fetching page: "
+            f"{before if before is not None else 'first'}"
+        )
 
         data = get_json(url)
+
+        if not isinstance(data, dict):
+            raise ValueError("Invalid gallery response")
 
         page_albums = data.get("albums")
 
         if not isinstance(page_albums, list):
-            raise ValueError("Invalid gallery response")
+            raise ValueError("Invalid gallery response: albums")
 
         albums.extend(page_albums)
+
+        # Preserve metadata from the latest response.
+        metadata = data
 
         print(
             f"[Gallery] Received {len(page_albums)} albums "
@@ -286,7 +346,7 @@ def get_gallery():
         visited_cursors.add(cursor)
         before = next_before
 
-    return data, albums
+    return metadata, albums
 
 
 def parse_images(value):
@@ -309,7 +369,10 @@ def parse_images(value):
 # ============================================================
 
 def build_photo_url(image_path):
-    url = urllib.parse.urljoin(API_URL, image_path)
+    url = urllib.parse.urljoin(
+        API_URL,
+        image_path
+    )
 
     # Prevent an unexpected external URL from being fetched.
     api_origin = urllib.parse.urlsplit(API_URL)
@@ -319,7 +382,9 @@ def build_photo_url(image_path):
         photo_origin.scheme != api_origin.scheme
         or photo_origin.netloc != api_origin.netloc
     ):
-        raise ValueError("Photo URL has an unexpected origin")
+        raise ValueError(
+            "Photo URL has an unexpected origin"
+        )
 
     return url
 
@@ -327,9 +392,11 @@ def build_photo_url(image_path):
 def download_photo(image_path):
     url = build_photo_url(image_path)
 
+    # Cookie is included in BROWSER_HEADERS.
     _, headers, content = request(
         url,
-        headers=BROWSER_HEADERS
+        headers=dict(BROWSER_HEADERS),
+        gallery_request=True
     )
 
     if not content:
@@ -341,7 +408,8 @@ def download_photo(image_path):
 
     if not content_type.startswith("image/"):
         raise ValueError(
-            f"Expected image but received {content_type or 'unknown'}"
+            f"Expected image but received "
+            f"{content_type or 'unknown'}"
         )
 
     extension = mimetypes.guess_extension(content_type)
@@ -376,7 +444,10 @@ def upload_discord(content, filename, album):
         parts.append(value.encode("utf-8"))
 
     add(f"--{boundary}\r\n")
-    add('Content-Disposition: form-data; name="payload_json"\r\n')
+    add(
+        'Content-Disposition: form-data; '
+        'name="payload_json"\r\n'
+    )
     add("Content-Type: application/json\r\n\r\n")
     add(json.dumps(payload, ensure_ascii=False))
     add("\r\n")
@@ -397,7 +468,9 @@ def upload_discord(content, filename, album):
 
     body = b"".join(parts)
 
-    parsed = urllib.parse.urlsplit(DISCORD_WEBHOOK_URL)
+    parsed = urllib.parse.urlsplit(
+        DISCORD_WEBHOOK_URL
+    )
 
     query = urllib.parse.parse_qsl(
         parsed.query,
@@ -435,28 +508,97 @@ def upload_discord(content, filename, album):
     result = json.loads(response)
 
     if not result.get("id"):
-        raise RuntimeError("Discord did not return message ID")
+        raise RuntimeError(
+            "Discord did not return message ID"
+        )
 
     return result
 
 
 # ============================================================
-# ntfy
+# Notifications
 # ============================================================
 
-def notify(message):
+def notify_ntfy(message):
+    if not NTFY_URL:
+        print("[ntfy] NTFY_URL is missing")
+        return False
+
     request(
         NTFY_URL,
         method="POST",
         headers={
             "Title": "Camp Gallery Backup",
-            "Priority": "default",
-            "Tags": "camera,floppy_disk"
+            "Priority": "high" if "Cookie" in message else "default",
+            "Tags": "warning,camera"
         },
         body=message.encode("utf-8")
     )
 
     print("[ntfy] Notification sent")
+
+    return True
+
+
+def notify_discord(message):
+    if not DISCORD_WEBHOOK_URL:
+        print("[Discord] DISCORD_WEBHOOK_URL is missing")
+        return False
+
+    payload = {
+        "content": message
+    }
+
+    body = json.dumps(
+        payload,
+        ensure_ascii=False
+    ).encode("utf-8")
+
+    _, _, _ = request(
+        DISCORD_WEBHOOK_URL,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "CampGalleryBackup/1.0"
+        },
+        body=body
+    )
+
+    print("[Discord] Notification sent")
+
+    return True
+
+
+def notify_authentication_failure(error):
+    message = (
+        "🚨 Camp Gallery Backup: Authentication Failed\n\n"
+        "ไม่สามารถเข้าถึง Gallery หรือดาวน์โหลดรูปได้\n\n"
+        f"⚠️ Error: {error}\n\n"
+        "สาเหตุที่เป็นไปได้:\n"
+        "• GALLERY_COOKIE หมดอายุหรือไม่ถูกต้อง\n"
+        "• Cloudflare ปฏิเสธ GitHub Actions runner\n"
+        "• Session ถูกยกเลิกจากเว็บไซต์\n\n"
+        "กรุณาเข้าสู่เว็บไซต์ m2talk ใหม่ "
+        "และอัปเดต GALLERY_COOKIE ใน GitHub Secrets"
+    )
+
+    print("[Authentication] Sending alerts...")
+
+    try:
+        notify_discord(message)
+
+    except Exception as notify_error:
+        print(
+            f"[Discord Alert Failed] {notify_error}"
+        )
+
+    try:
+        notify_ntfy(message)
+
+    except Exception as notify_error:
+        print(
+            f"[ntfy Alert Failed] {notify_error}"
+        )
 
 
 # ============================================================
@@ -464,23 +606,46 @@ def notify(message):
 # ============================================================
 
 def main():
+    print("=" * 55)
+    print("Camp Gallery Backup")
+    print("=" * 55)
+
     cache = load_cache()
     uploaded = cache["uploaded"]
 
     sent = 0
     skipped = 0
     failed = 0
+
     total_albums = 0
     total_images = 0
 
     status = "success"
     error_message = ""
-
-    print("=" * 55)
-    print("Camp Gallery Backup")
-    print("=" * 55)
+    authentication_error = False
 
     try:
+        # Validate required configuration.
+        if not API_URL:
+            raise RuntimeError("API_URL secret is missing")
+
+        if not DISCORD_WEBHOOK_URL:
+            raise RuntimeError(
+                "DISCORD_WEBHOOK_URL secret is missing"
+            )
+
+        if not NTFY_URL:
+            raise RuntimeError("NTFY_URL secret is missing")
+
+        if not GALLERY_COOKIE:
+            raise CookieAuthenticationError(
+                "GALLERY_COOKIE secret is missing"
+            )
+
+        # ----------------------------------------------------
+        # Fetch Gallery
+        # ----------------------------------------------------
+
         metadata, albums = get_gallery()
 
         total_albums = len(albums)
@@ -494,11 +659,15 @@ def main():
                 f"{old_version} -> {reset_version}"
             )
 
-            # Preserve upload history even if the source resets.
+            # Preserve upload history even if source resets.
             cache["resetVersion"] = reset_version
             save_cache(cache)
 
         print(f"[Gallery] Albums: {total_albums}")
+
+        # ----------------------------------------------------
+        # Process Albums
+        # ----------------------------------------------------
 
         for album in albums:
             album_id = album.get("id")
@@ -508,14 +677,21 @@ def main():
                 images = parse_images(
                     album.get("images", [])
                 )
+
             except Exception as error:
                 failed += 1
+
                 print(
-                    f"[Album {album_id}] Invalid images: {error}"
+                    f"[Album {album_id}] "
+                    f"Invalid images: {error}"
                 )
+
                 continue
 
-            for index, image_path in enumerate(images, start=1):
+            for index, image_path in enumerate(
+                images,
+                start=1
+            ):
                 total_images += 1
 
                 try:
@@ -524,7 +700,9 @@ def main():
                     # Skip before downloading.
                     if image_id in uploaded:
                         skipped += 1
+
                         print(f"[Skip] {image_id}")
+
                         continue
 
                     print(
@@ -536,9 +714,7 @@ def main():
                         image_path
                     )
 
-                    filename = (
-                        f"{image_id}{extension}"
-                    )
+                    filename = f"{image_id}{extension}"
 
                     print(
                         f"[Upload] {filename} "
@@ -574,6 +750,10 @@ def main():
 
                     time.sleep(UPLOAD_DELAY)
 
+                except CookieAuthenticationError:
+                    # Stop immediately if Gallery rejects Cookie.
+                    raise
+
                 except Exception as error:
                     failed += 1
 
@@ -585,17 +765,31 @@ def main():
         if failed:
             status = "partial"
 
+    except CookieAuthenticationError as error:
+        status = "error"
+        authentication_error = True
+        error_message = str(error)
+
+        print(f"[Authentication Error] {error}")
+
     except Exception as error:
         status = "error"
         error_message = str(error)
 
         print(f"[Fatal] {error}")
 
+    # --------------------------------------------------------
+    # Summary
+    # --------------------------------------------------------
+
     timestamp = datetime.now(TIMEZONE).strftime(
         "%d/%m/%Y %H:%M:%S"
     )
 
-    message = "\n".join([
+    summary_lines = [
+        "=======================================================",
+        "Camp Gallery Backup",
+        "=======================================================",
         f"🕒 Updated: {timestamp}",
         f"📚 Albums scanned: {total_albums}",
         f"🖼️ Images scanned: {total_images}",
@@ -605,16 +799,47 @@ def main():
         f"💾 Total cached: {len(uploaded)} images",
         f"🔄 Reset version: {cache.get('resetVersion')}",
         f"📌 Status: {status}",
-        f"⚠️ Error: {error_message}" if error_message else ""
-    ])
+    ]
+
+    if error_message:
+        summary_lines.append(
+            f"⚠️ Error: {error_message}"
+        )
+
+    if authentication_error:
+        summary_lines.extend([
+            "",
+            "🚨 Authentication failed.",
+            "Please refresh GALLERY_COOKIE in GitHub Secrets."
+        ])
+
+    message = "\n".join(summary_lines)
 
     print("\n" + message)
 
+    # --------------------------------------------------------
+    # Authentication Alerts
+    # --------------------------------------------------------
+
+    if authentication_error:
+        notify_authentication_failure(error_message)
+
+    # --------------------------------------------------------
+    # ntfy Summary
+    # --------------------------------------------------------
+
     try:
-        notify(message)
+        notify_ntfy(message)
+
     except Exception as error:
         print(f"[ntfy] Failed: {error}")
-        status = "error"
+
+        if status == "success":
+            status = "error"
+
+    # --------------------------------------------------------
+    # Exit
+    # --------------------------------------------------------
 
     if status != "success":
         raise SystemExit(1)
