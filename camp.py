@@ -1,37 +1,84 @@
 
 import os
+import re
 import json
 import time
-import hashlib
+import uuid
 import mimetypes
 import urllib.request
 import urllib.error
+import urllib.parse
+
 from pathlib import Path
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 from zoneinfo import ZoneInfo
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 
 # ============================================================
-# Configuration: GitHub Secrets
+# Configuration
 # ============================================================
 
 API_URL = os.environ["API_URL"]
 DISCORD_WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 NTFY_URL = os.environ["NTFY_URL"]
 
-STATE_FILE = Path("data/uploaded.json")
+CACHE_FILE = Path("cache.json")
 
 TIMEZONE = ZoneInfo("Asia/Bangkok")
-MAX_RETRIES = 5
 REQUEST_TIMEOUT = 60
+MAX_RETRIES = 5
+UPLOAD_DELAY = 1
+
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
+    ),
+    "Referer": "https://m2talk.akkawit.com/",
+}
+
+UUID_PATTERN = re.compile(
+    r"([0-9a-f]{8}-[0-9a-f]{4}-"
+    r"[0-9a-f]{4}-[0-9a-f]{4}-"
+    r"[0-9a-f]{12})$",
+    re.IGNORECASE
+)
 
 
 # ============================================================
 # HTTP
 # ============================================================
 
-def http_request(url, method="GET", headers=None, body=None):
+def retry_delay(headers, attempt):
+    value = headers.get("Retry-After", "")
+
+    if value:
+        try:
+            return min(float(value), 120)
+        except ValueError:
+            try:
+                retry_date = parsedate_to_datetime(value)
+                return min(
+                    max(
+                        (retry_date - datetime.now(
+                            retry_date.tzinfo
+                        )).total_seconds(),
+                        1
+                    ),
+                    120
+                )
+            except (ValueError, TypeError):
+                pass
+
+    return min(2 ** attempt, 60)
+
+
+def request(url, method="GET", headers=None, body=None):
     headers = headers or {}
 
     for attempt in range(MAX_RETRIES + 1):
@@ -47,118 +94,169 @@ def http_request(url, method="GET", headers=None, body=None):
                 req,
                 timeout=REQUEST_TIMEOUT
             ) as response:
-                return response.status, response.headers, response.read()
+                return (
+                    response.status,
+                    response.headers,
+                    response.read()
+                )
 
         except urllib.error.HTTPError as error:
-            if (
-                error.code == 429 or error.code >= 500
-            ) and attempt < MAX_RETRIES:
-                retry_after = error.headers.get("Retry-After", "5")
+            # POST is not automatically retried on 5xx.
+            # Discord may have accepted the upload already.
+            retryable = (
+                error.code == 429
+                or (
+                    method == "GET"
+                    and error.code >= 500
+                )
+            )
 
-                try:
-                    delay = min(float(retry_after), 120)
-                except ValueError:
-                    delay = 5
+            if not retryable or attempt >= MAX_RETRIES:
+                raise
 
-                print(f"HTTP {error.code}, retrying in {delay}s")
-                time.sleep(delay)
-                continue
+            delay = retry_delay(error.headers, attempt)
 
-            raise
+            print(
+                f"[HTTP] {error.code}, retrying in {delay}s"
+            )
+
+            time.sleep(delay)
 
         except (
             urllib.error.URLError,
             TimeoutError,
             ConnectionError
-        ):
-            if attempt >= MAX_RETRIES:
+        ) as error:
+            # Retrying POST after a connection failure can
+            # produce duplicate Discord messages.
+            if method != "GET" or attempt >= MAX_RETRIES:
                 raise
 
             delay = min(2 ** attempt, 60)
-            print(f"Network error, retrying in {delay}s")
+
+            print(
+                f"[HTTP] Network error, retrying in {delay}s"
+            )
+
             time.sleep(delay)
 
     raise RuntimeError("Maximum retries exceeded")
 
 
-def http_json(url):
-    _, _, body = http_request(
+def get_json(url):
+    _, _, body = request(
         url,
-        headers={"Accept": "application/json"}
+        headers={
+            "Accept": "application/json",
+            "User-Agent": BROWSER_HEADERS["User-Agent"]
+        }
     )
+
     return json.loads(body)
 
 
 # ============================================================
-# State
+# Cache
 # ============================================================
 
-def load_state():
-    if not STATE_FILE.exists():
-        return {"uploaded": []}
+def load_cache():
+    if not CACHE_FILE.exists():
+        return {
+            "resetVersion": None,
+            "uploaded": {}
+        }
 
-    with STATE_FILE.open("r", encoding="utf-8") as file:
-        state = json.load(file)
+    with CACHE_FILE.open("r", encoding="utf-8") as file:
+        cache = json.load(file)
 
-    if not isinstance(state.get("uploaded"), list):
-        raise ValueError("Invalid uploaded.json format")
+    if not isinstance(cache.get("uploaded"), dict):
+        raise ValueError("Invalid cache.json")
 
-    return state
+    return cache
 
 
-def save_state(state):
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-
-    temporary = STATE_FILE.with_suffix(".tmp")
+def save_cache(cache):
+    temporary = CACHE_FILE.with_suffix(".tmp")
 
     with temporary.open("w", encoding="utf-8") as file:
         json.dump(
-            state,
+            cache,
             file,
             ensure_ascii=False,
             indent=2
         )
         file.write("\n")
 
-    temporary.replace(STATE_FILE)
+    temporary.replace(CACHE_FILE)
 
 
-def make_record_key(image_url):
-    parsed = urlparse(image_url)
-    key = parse_qs(parsed.query).get("key", [None])[0]
+def get_image_id(image_url):
+    parsed = urllib.parse.urlparse(image_url)
 
-    if not key:
-        key = image_url
+    query = urllib.parse.parse_qs(parsed.query)
+    keys = query.get("key", [])
 
-    return hashlib.sha256(
-        key.encode("utf-8")
-    ).hexdigest()
+    if not keys:
+        raise ValueError("Photo key not found")
+
+    key = keys[0]
+
+    match = UUID_PATTERN.search(key)
+
+    if not match:
+        raise ValueError("Cannot extract UUID from photo key")
+
+    return match.group(1).lower()
 
 
 # ============================================================
 # Gallery Pagination
 # ============================================================
 
+def build_gallery_url(before=None):
+    if before is None:
+        return API_URL
+
+    parsed = urllib.parse.urlsplit(API_URL)
+
+    query = urllib.parse.parse_qsl(
+        parsed.query,
+        keep_blank_values=True
+    )
+
+    query = [
+        (key, value)
+        for key, value in query
+        if key != "before"
+    ]
+
+    query.append(("before", str(before)))
+
+    return urllib.parse.urlunsplit((
+        parsed.scheme,
+        parsed.netloc,
+        parsed.path,
+        urllib.parse.urlencode(query),
+        parsed.fragment
+    ))
+
+
 def get_gallery():
     albums = []
+    visited_cursors = set()
     before = None
-    visited = set()
 
     while True:
-        url = API_URL
+        url = build_gallery_url(before)
 
-        if before is not None:
-            separator = "&" if "?" in url else "?"
-            url += separator + urlencode({"before": before})
+        print(f"[Gallery] Fetching page: {before or 'first'}")
 
-        print(f"[Gallery] Fetching: page cursor={before}")
+        data = get_json(url)
 
-        data = http_json(url)
-
-        page_albums = data.get("albums", [])
+        page_albums = data.get("albums")
 
         if not isinstance(page_albums, list):
-            raise ValueError("Invalid albums response")
+            raise ValueError("Invalid gallery response")
 
         albums.extend(page_albums)
 
@@ -173,17 +271,17 @@ def get_gallery():
         next_before = data.get("nextBefore")
 
         if next_before is None:
-            raise ValueError("Missing nextBefore cursor")
+            raise ValueError("Missing nextBefore")
 
         cursor = str(next_before)
 
-        if cursor in visited:
+        if cursor in visited_cursors:
             raise ValueError("Repeated pagination cursor")
 
-        visited.add(cursor)
+        visited_cursors.add(cursor)
         before = next_before
 
-    return albums
+    return data, albums
 
 
 def parse_images(value):
@@ -191,22 +289,73 @@ def parse_images(value):
         return value
 
     if isinstance(value, str):
-        result = json.loads(value)
+        images = json.loads(value)
 
-        if not isinstance(result, list):
+        if not isinstance(images, list):
             raise ValueError("Invalid images JSON")
 
-        return result
+        return images
 
     return []
+
+
+# ============================================================
+# Photo Download
+# ============================================================
+
+def build_photo_url(image_path):
+    url = urllib.parse.urljoin(API_URL, image_path)
+
+    # Prevent an unexpected external URL from being fetched.
+    api_origin = urllib.parse.urlsplit(API_URL)
+    photo_origin = urllib.parse.urlsplit(url)
+
+    if (
+        photo_origin.scheme != api_origin.scheme
+        or photo_origin.netloc != api_origin.netloc
+    ):
+        raise ValueError("Photo URL has an unexpected origin")
+
+    return url
+
+
+def download_photo(image_path):
+    url = build_photo_url(image_path)
+
+    _, headers, content = request(
+        url,
+        headers=BROWSER_HEADERS
+    )
+
+    if not content:
+        raise ValueError("Empty image response")
+
+    content_type = headers.get(
+        "Content-Type", ""
+    ).split(";")[0].strip().lower()
+
+    if not content_type.startswith("image/"):
+        raise ValueError(
+            f"Expected image but received {content_type or 'unknown'}"
+        )
+
+    extension = mimetypes.guess_extension(content_type)
+
+    if extension == ".jpe":
+        extension = ".jpg"
+
+    if not extension:
+        extension = ".jpg"
+
+    return content, extension
 
 
 # ============================================================
 # Discord Multipart Upload
 # ============================================================
 
-def build_multipart(filename, content, album):
-    boundary = "----CampBoundary7MA4YWxkTrZu0gW"
+def upload_discord(content, filename, album):
+    boundary = "----CampBoundary" + uuid.uuid4().hex
 
     payload = {
         "content": (
@@ -227,35 +376,52 @@ def build_multipart(filename, content, album):
     add(json.dumps(payload, ensure_ascii=False))
     add("\r\n")
 
+    safe_filename = filename.replace('"', "_")
+
     add(f"--{boundary}\r\n")
     add(
-        f'Content-Disposition: form-data; '
-        f'name="files[0]"; filename="{filename}"\r\n'
+        'Content-Disposition: form-data; '
+        f'name="files[0]"; filename="{safe_filename}"\r\n'
     )
     add("Content-Type: application/octet-stream\r\n\r\n")
 
     parts.append(content)
+
     add("\r\n")
     add(f"--{boundary}--\r\n")
 
-    return boundary, b"".join(parts)
+    body = b"".join(parts)
 
+    parsed = urllib.parse.urlsplit(DISCORD_WEBHOOK_URL)
 
-def upload_discord(content, filename, album):
-    boundary, body = build_multipart(
-        filename,
-        content,
-        album
+    query = urllib.parse.parse_qsl(
+        parsed.query,
+        keep_blank_values=True
     )
 
-    separator = "&" if "?" in DISCORD_WEBHOOK_URL else "?"
-    webhook_url = DISCORD_WEBHOOK_URL + separator + "wait=true"
+    query = [
+        (key, value)
+        for key, value in query
+        if key != "wait"
+    ]
 
-    _, _, response = http_request(
+    query.append(("wait", "true"))
+
+    webhook_url = urllib.parse.urlunsplit((
+        parsed.scheme,
+        parsed.netloc,
+        parsed.path,
+        urllib.parse.urlencode(query),
+        parsed.fragment
+    ))
+
+    _, _, response = request(
         webhook_url,
         method="POST",
         headers={
-            "Content-Type": f"multipart/form-data; boundary={boundary}",
+            "Content-Type": (
+                f"multipart/form-data; boundary={boundary}"
+            ),
             "Content-Length": str(len(body))
         },
         body=body
@@ -264,41 +430,21 @@ def upload_discord(content, filename, album):
     result = json.loads(response)
 
     if not result.get("id"):
-        raise RuntimeError("Discord did not return a message ID")
+        raise RuntimeError("Discord did not return message ID")
 
     return result
 
 
 # ============================================================
-# Download
+# ntfy
 # ============================================================
 
-def download_image(image_url):
-    _, headers, content = http_request(image_url)
-
-    content_type = headers.get(
-        "Content-Type",
-        "application/octet-stream"
-    ).split(";")[0].strip()
-
-    extension = mimetypes.guess_extension(content_type) or ".jpg"
-
-    if extension == ".jpe":
-        extension = ".jpg"
-
-    return content, extension
-
-
-# ============================================================
-# ntfy Notification
-# ============================================================
-
-def notify(message, title="Camp Gallery Backup"):
-    _, _, response = http_request(
+def notify(message):
+    request(
         NTFY_URL,
         method="POST",
         headers={
-            "Title": title,
+            "Title": "Camp Gallery Backup",
             "Priority": "default",
             "Tags": "camera,floppy_disk"
         },
@@ -313,108 +459,119 @@ def notify(message, title="Camp Gallery Backup"):
 # ============================================================
 
 def main():
-    state = load_state()
-
-    uploaded = {
-        item["key"]
-        for item in state["uploaded"]
-    }
+    cache = load_cache()
+    uploaded = cache["uploaded"]
 
     sent = 0
     skipped = 0
     failed = 0
     total_albums = 0
+    total_images = 0
+
     status = "success"
     error_message = ""
 
-    print("=" * 50)
+    print("=" * 55)
     print("Camp Gallery Backup")
-    print("=" * 50)
+    print("=" * 55)
 
     try:
-        albums = get_gallery()
+        metadata, albums = get_gallery()
+
         total_albums = len(albums)
 
-        print(f"[Gallery] Total albums: {total_albums}")
+        reset_version = metadata.get("resetVersion")
+        old_version = cache.get("resetVersion")
+
+        if old_version != reset_version:
+            print(
+                f"[Gallery] resetVersion changed: "
+                f"{old_version} -> {reset_version}"
+            )
+
+            # Preserve upload history even if the source resets.
+            cache["resetVersion"] = reset_version
+            save_cache(cache)
+
+        print(f"[Gallery] Albums: {total_albums}")
 
         for album in albums:
             album_id = album.get("id")
             album_name = album.get("name", "Unknown")
 
             try:
-                images = parse_images(album.get("images", []))
+                images = parse_images(
+                    album.get("images", [])
+                )
             except Exception as error:
                 failed += 1
-                print(f"[Album {album_id}] Invalid images: {error}")
+                print(
+                    f"[Album {album_id}] Invalid images: {error}"
+                )
                 continue
 
-            for index, image_url in enumerate(images, start=1):
+            for index, image_path in enumerate(images, start=1):
+                total_images += 1
+
                 try:
-                    record_key = make_record_key(image_url)
+                    image_id = get_image_id(image_path)
 
-                    if record_key in uploaded:
+                    # Skip before downloading.
+                    if image_id in uploaded:
                         skipped += 1
+                        print(f"[Skip] {image_id}")
                         continue
-
-                    photo_url = urllib.request.urljoin(
-                        API_URL,
-                        image_url
-                    )
 
                     print(
                         f"[Download] Album {album_id}, "
-                        f"image {index}"
+                        f"image {index}: {image_id}"
                     )
 
-                    content, extension = download_image(photo_url)
-
-                    if not content:
-                        raise ValueError("Empty image")
+                    content, extension = download_photo(
+                        image_path
+                    )
 
                     filename = (
-                        f"album-{album_id}-{index}{extension}"
+                        f"{image_id}{extension}"
                     )
 
                     print(
-                        f"[Discord] Uploading {filename} "
+                        f"[Upload] {filename} "
                         f"({len(content)} bytes)"
                     )
 
-                    discord_result = upload_discord(
+                    result = upload_discord(
                         content,
                         filename,
                         album
                     )
 
-                    record = {
-                        "key": record_key,
+                    # Only record after confirmed Discord success.
+                    uploaded[image_id] = {
                         "albumId": album_id,
                         "albumName": album_name,
                         "filename": filename,
-                        "discordMessageId": discord_result["id"],
+                        "discordMessageId": result["id"],
                         "uploadedAt": datetime.now(
                             TIMEZONE
                         ).isoformat()
                     }
 
-                    state["uploaded"].append(record)
-                    uploaded.add(record_key)
-
-                    # Save immediately after successful upload.
-                    save_state(state)
+                    # Persist immediately.
+                    save_cache(cache)
 
                     sent += 1
 
                     print(
-                        f"[Success] {filename} "
-                        f"-> {discord_result['id']}"
+                        f"[Success] {image_id} "
+                        f"-> {result['id']}"
                     )
 
-                    # Avoid sending requests too rapidly.
-                    time.sleep(1)
+                    time.sleep(UPLOAD_DELAY)
 
                 except Exception as error:
                     failed += 1
+
                     print(
                         f"[Failed] Album {album_id}, "
                         f"image {index}: {error}"
@@ -436,10 +593,12 @@ def main():
     message = "\n".join([
         f"🕒 Updated: {timestamp}",
         f"📚 Albums scanned: {total_albums}",
+        f"🖼️ Images scanned: {total_images}",
         f"📤 Discord uploaded: {sent} images",
         f"⏭️ Already uploaded: {skipped} images",
         f"❌ Failed: {failed} images",
-        f"💾 Total records: {len(state['uploaded'])}",
+        f"💾 Total cached: {len(uploaded)} images",
+        f"🔄 Reset version: {cache.get('resetVersion')}",
         f"📌 Status: {status}",
         f"⚠️ Error: {error_message}" if error_message else ""
     ])
