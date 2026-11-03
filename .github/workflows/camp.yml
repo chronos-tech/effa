@@ -3,8 +3,7 @@ name: Camp Gallery Backup
 
 on:
   repository_dispatch:
-    types:
-      - camp_cron
+    types: [camp_cron]
 
   workflow_dispatch:
 
