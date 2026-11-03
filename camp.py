@@ -24,6 +24,11 @@ DISCORD_WEBHOOK_URL = os.environ["DISCORD_WEBHOOK_URL"]
 NTFY_URL = os.environ["NTFY_URL"]
 
 CACHE_FILE = Path("cache.json")
+GALLERY_COOKIE = os.environ.get("GALLERY_COOKIE", "").strip()
+
+if not GALLERY_COOKIE:
+    raise RuntimeError("GALLERY_COOKIE secret is missing")
+
 
 TIMEZONE = ZoneInfo("Asia/Bangkok")
 REQUEST_TIMEOUT = 60
@@ -31,15 +36,15 @@ MAX_RETRIES = 5
 UPLOAD_DELAY = 1
 
 BROWSER_HEADERS = {
+    "Accept": "*/*",
+    "Accept-Language": "en,th;q=0.9,en-US;q=0.8,en-GB;q=0.7",
+    "Cookie": GALLERY_COOKIE,
+    "Referer": "https://m2talk.akkawit.com/",
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/131.0.0.0 Safari/537.36"
+        "Chrome/156.0.0.0 Safari/537.36 Edg/156.0.0.0"
     ),
-    "Accept": (
-        "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
-    ),
-    "Referer": "https://m2talk.akkawit.com/",
 }
 
 UUID_PATTERN = re.compile(
